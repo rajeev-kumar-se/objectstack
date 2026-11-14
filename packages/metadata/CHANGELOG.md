@@ -1,5 +1,364 @@
 # @objectstack/metadata
 
+## 18.4.0
+
+### Minor Changes
+
+- 39aa3f6: refactor(spec)!: retire the `ragPipelines` collection listings no stack can declare, and with them the `rag_pipeline` metadata type at the `/meta` door (#31380)
+  
+  Clause-②: no (narrowing) — `PLURAL_TO_SINGULAR` (a published `@objectstack/spec` export, typed `Record<string, string>`) loses its `ragPipelines` row, so `/meta/rag_pipeline` leaves the URL-spelling contract and a write that would start the type's namespace is refused where it was stored before. Nothing is widened.
+  Metadata-protocol: narrowed
+  
+  <!-- adr-0087: registered meta-type-rag-pipeline-retired -->
+  
+  **BREAKING** for a client that writes metadata under the type `rag_pipeline` through `PUT /meta/rag_pipeline/:name`, or that reads `PLURAL_TO_SINGULAR.ragPipelines` / `SINGULAR_TO_PLURAL.rag_pipeline`.
+  
+  - **`@objectstack/spec`.** `ragPipelines` is removed from `PLURAL_TO_SINGULAR` (and so from `SINGULAR_TO_PLURAL` and the generated `META_URL_TO_SINGULAR`). The stack schema never declared the key, so `defineStack({ ragPipelines })` was refused before and still is, now with a prescription instead of the bare unrecognized-key message; no stack could ever ship one. Retiring the row takes `rag_pipeline` out of the `/meta` URL-spelling contract, as the `themes` row's retirement did for `theme`: the type now gets the unrecognised-type refusal (`400 INVALID_REQUEST`, "'rag_pipeline' is not a metadata type") at the write door instead of the no-schema branch that stored any JSON, and `GET /meta/types` no longer advertises it as creatable. The refusal is not unconditional: the write door keeps accepting a type whose namespace already exists in the deployment's `sys_metadata`, so a deployment that already holds `rag_pipeline` rows still has schema-less writes to that type accepted until those rows are deleted. The upgrade guide carries the semantic entry `meta-type-rag-pipeline-retired`. No ADR-0087 conversion: no stack source can hold the key, so `os migrate meta` has nothing to rewrite.
+  - **`@objectstack/objectql`.** `ragPipelines` leaves the collections the engine registers from a manifest and from a nested plugin. A parsed stack never carried it; only a hand-built manifest handed straight to `registerApp` could, and its `ragPipelines` array is now ignored like any other undeclared key.
+  - **`@objectstack/metadata`.** `ragPipelines` leaves the artifact field map; the strict stack parse already refused an artifact definition that carried it.
+  - **`@objectstack/runtime`.** `ragPipelines` leaves the app-payload probe that decides whether a bundle with no app id was meant to register an app.
+  - **Package export.** `GET /packages/:id/export` and `GET /packages/export` build their collections from `PLURAL_TO_SINGULAR`, so a `rag_pipeline` row a deployment wrote under a package through the old door is no longer exported. Such a row is not rewritten: `/meta` reads still answer and `DELETE /meta/rag_pipeline/:name` still works, so delete the residue rather than rely on an export to carry it. Deleting the last row also closes the namespace, after which a write to the type is refused there too. An older export carrying a non-empty `ragPipelines` array is refused by a customization-pair install, which names the key; an empty one is skipped as before.
+  
+  **The remedy.** Delete any `ragPipelines` key from a stack source, artifact or hand-built manifest, and stop writing `/meta/rag_pipeline`; nothing replaces it. Retrieval sources are described by the knowledge-source schemas in `@objectstack/spec/ai` and indexed by the knowledge service a deployment installs, not by a stack collection.
+
+### Patch Changes
+
+- 6c6cfcc: feat(metadata): a read-only count of the history snapshots the drained-key scrub would rewrite
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  `@objectstack/metadata/migrations` gains `scrubHistoryDrainedKeys(driver, { mode: 'count' })`, the count mode of a one-time scrub of `sys_metadata_history` snapshots written before history started withholding what a connector save drains (undeclared `auth` keys).
+  
+  - **One predicate.** A stored snapshot is counted exactly when `historySnapshotBody` — the helper both history writers already store through — would store a different body for it today. Nothing in the count names a key or a type, so the count and the write-time withholding cannot disagree, and a snapshot written since that withholding landed is never counted.
+  - **Read-only.** It takes a driver's `find` and nothing else, pages the table by primary key, and reports the number of affected rows, the number of distinct items they belong to, and the affected rows' ids as opaque handles. A body that is not JSON, or one the snapshot helper cannot reduce, is listed beside the count, never folded into it. The result never carries a key name, a value or a body.
+  - **Count only.** Any other mode is refused before anything is read. The rewrite of stored history runs only after the maintainer confirms the count; run the count on a copy of the database and hand its numbers over privately.
+- abc7a94: fix(metadata): a `sys_metadata_history` snapshot no longer stores what a connector save drains from the live row
+  
+  Clause-②: yes (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no authoring door accepts or refuses anything it did not before. Only the body a history row stores for a new write changes; existing history rows are left as they are, so there is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** for a reader of raw `sys_metadata_history` rows that expected a connector snapshot to hold an undeclared `auth` key. No door serves one: the history read exit already withheld it.
+  
+  A connector row stored before the instance-auth shapes went strict can hold a value under an `auth` key its kind does not declare. A save of the served form drains that key from the live row, but a history snapshot is a second copy of the body at rest, and nothing stopped a new snapshot from keeping it: a revert to an older version wrote it into a fresh `revert` snapshot, and a write that no door re-judged did too. Now:
+  
+  - **Both history writers store the snapshot through one helper**, `historySnapshotBody`, published as `@objectstack/metadata/history-snapshot`: `SysMetadataRepository.put` in `@objectstack/metadata-protocol` (behind the `/meta` save door, publish and revert) and `DatabaseLoader` in `@objectstack/metadata`.
+  - **What it leaves out is the type's redactor's own answer**: every position named in `notCarriedForwardKeys`, the same answer the save's carry-forward drains by. For a connector those are its undeclared `auth` keys and the undeclared keys inside an object `retryConfig`. Nothing in the helper names a key or a type.
+  - **Every other body is stored as written, byte for byte.** That covers every type whose redactor marks no such position, and every type with no redactor. The history row's `checksum` keeps naming the live row's stamp, and the history read exit (`redactStoredMetadataRow(s)`) is unchanged.
+  
+  History rows written before this change are not rewritten here. A one-time scrub follows separately, after a read-only count.
+- 9e1f1f9: fix(cluster): a Redis outage no longer crashes replicas, is logged once, and caches re-read on reconnect
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  Every API addition below is a new export or an optional member (a widening). The one new default is the bounded command time on the redis driver. Multi-replica deployments on the `redis` cluster driver only. The single-node default (the in-process `memory` driver, no declared replicas) behaves exactly as before: it never loses a connection, so none of the paths below runs on it.
+  
+  - **No crash on a dead lock (`@objectstack/service-job`).** `CronJobAdapter` leader-elects every scheduled fire on the cluster lock. When the lock store was unreachable, `acquire` rejected inside a timer callback, the rejection went unhandled, and every replica exited at its next tick. A failed `acquire` now skips that fire (no node can prove it alone runs it) and the next tick asks again; a failed `release` after the fire ran is absorbed (the lease expires on its TTL). The adapter logs ONE warning per lock outage — not one per tick — and one info line when the lock answers again. No process-wide `unhandledRejection` handler is added.
+  - **The driver watches its connections (`@objectstack/service-cluster-redis`).** Every ioredis client the driver holds (the command connection and the pub/sub subscriber) now has an `error` listener, so ioredis no longer prints `[ioredis] Unhandled error event` with a stack per reconnect attempt. The driver logs one warning when the store becomes unreachable (naming `host:port`, never the URL or a password) and one info line when it returns. New option: `driverOptions.logger` (`{ warn, info? }`, default `console`).
+  - **Bounded commands.** `createRedisClient()` now sets `commandTimeout: REDIS_COMMAND_TIMEOUT_MS` (2000 ms; exported). A black-holed Redis (a socket that accepts and never answers) used to hold a caller about 30 s — a sign-in counting through the shared cache included, since the cache derives its connection with `client.duplicate()`, which inherits the bound. Every command the driver and the shared cache issue is O(1); a caller that needs longer passes its own `options.commandTimeout`, or its own client through `driverOptions.client`.
+  - **`cluster.resync` (`@objectstack/service-cluster`).** Cross-node cache hints ride at-most-once pub/sub, so a hint published during an outage was lost and a peer kept serving what it had cached until restart. When the driver's connection returns after an outage it now emits ONE local `cluster.resync` event (never published to peers). New exports: `onClusterResync(cluster, handler)` to subscribe (a no-op on the memory driver), `readClusterDriverHealth(cluster)` (a passive reading of the driver's connection state, type `ClusterDriverLivenessHealth`: `{ driver, nodeId, state: 'unknown' | 'up' | 'down', since, outages, lastError? }`, `undefined` on the memory driver; the active store probe `/ready` uses is `probeClusterDriverHealth()`), and `ClusterDriverLiveness` / `offerClusterDriverLiveness` for driver authors, plus `CLUSTER_RESYNC_EVENT`, `describeConnectionError` and `redactCredentials`.
+  - **The caches re-read on it.** `MetadataClusterBridgePlugin` calls each attached lane's resync seam: `MetadataManager.resyncClusterPubSub()` (`@objectstack/metadata`: drops every list cache and the endpoint index, so the next `list()` re-reads the loaders; registry entries are kept), `DatasourceAdminService.resyncDatasourceMutationPubSub()` (`@objectstack/service-datasource`: re-converges every stored datasource and every held pool from this replica's own read), and `AutomationEngine.resyncConnectorCredentialPubSub()` (`@objectstack/service-automation`: the connector reconcile a peer's signal runs; the connector-credential door gains an optional `resyncFromCluster()`). `AuthzClusterBridgePlugin` advances the engine's write epoch (reason `remote`), retiring cached grants. The `metadata.mutated` registry lane has no resync yet; it still converges per item on delivered signals and fully at boot.
+- cc16008: fix(objectql)!: a field's picklist resolves from the package that declares the field, and the api endpoint index keeps one item per package and name
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no stored shape changes. What moves is which list a field's existing `picklist` name resolves to at runtime, through the package-scoped resolver ADR-0150 D3 rules, so there is nothing for a migration to rewrite; the D10 upgrade report lists each reference the narrowing refuses. -->
+  
+  **BREAKING** for a field whose `picklist` names a list its own package cannot reach (`@objectstack/objectql`). A field's `picklist` now resolves from the package that declares the field: that package's own list, else the one package in its declared dependency closure (`manifest.dependencies`, plus the platform's `sys` packages) that holds the name, else nothing. Two kinds of reference that used to be served now are not:
+  
+  - a field of a package whose list only an environment-authored item holds (one created in this environment, bound to no package);
+  - a field of a package whose list another package holds, when the field's package does not declare a dependency on it. Two packages shipped in one artifact are no exception: a sibling's list needs a declared dependency too.
+  
+  Before, either field was served that list's options. After, it is served with no options and its values are refused, and the boot names each one in a warning instead of failing. A package installed after the boot that carries such a reference is refused at install, naming every holder. The fix is one line: add the package that holds the list to the field's package `manifest.dependencies`, or declare the list in the field's own package.
+  
+  Unchanged: a field whose package holds the list, or depends on the package that holds it, is served exactly as before; a field written only by an environment-authored body (a tenant overlay, an object created in Studio) resolves the name environment-wide, as before; and a `picklistExtensions` entry still adds its options to the one list its `extend` names in the environment, whether or not its package depends on that list's package.
+  
+  `@objectstack/metadata`: the api endpoint index reads its stored items one per package and name, so two packages' same-named api items are no longer collapsed into one before the matcher reads them. A package-less row under a name one package holds is that package's customization and keeps sharing its slot. While each api name has one package holder, every route answers as before.
+- 45f0f81: fix(metadata, objectql): two packages' same-named `api` items are both kept and both served, and a read of one by its package gets that package's own body (ADR-0150 D3/D5)
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  Skills-docs: none — `skills/**` and `content/docs/**` teach no `/meta/api` read at a package or `_env` that does not hold the item, and no answer for an api name two packages hold; the refusal names the holder to address.
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no metadata shape, schema, stored row or registered node type changes: the change is which item a by-name api read answers and that the in-memory store keeps each package's item, the stored metadata is read exactly as before, so there is nothing for `objectstack migrate meta` to rewrite -->
+  
+  The metadata service kept its in-memory `api` items by bare name, so when two packages (two namespaces) declared an `api` with the same name, the one registered last overwrote the other. The first package's endpoint path answered `404 ENDPOINT_NOT_FOUND`, and `GET /api/v1/meta/api/<its namespace>/<name>` (or `?package=<its id>`) answered `200` with the OTHER package's body, stamped with the requested package's `_packageId`. Each package's `api` item now has its own `(package, name)` slot: both endpoint paths are served, and a read naming a package answers that package's item, never another's. With one package holding a name, every read answers exactly as before.
+  
+  `api` also joins the types whose by-name reads follow the one package-scoped rule (ADR-0150 D3) and the exact qualifier (D5), as apps, pages, dashboards, reports, books, analytics cubes, tools, skills and agents already do.
+  
+  **BREAKING** for three `/meta/api` answers that served an item the address did not name (first-party count: 0 in the four example apps, which never address an api at a package that does not hold it):
+  
+  1. `GET /meta/api/<name>?package=X` and `GET /meta/api/<X's namespace>/<name>`, for an api `X` does not hold, served the holder's item. It is now `409 RESOURCE_CONFLICT` naming the holders.
+  2. `GET /meta/api/_env/<name>`, for an api a package holds and the environment does not, served the package's item. It is now `409 RESOURCE_CONFLICT` naming the holder.
+  3. `GET /meta/api/<name>` of a name two packages hold served one of them. It is now `409 RESOURCE_CONFLICT` naming both. The metadata service's own `get('api', name)` with no package refuses the same way.
+  
+  The fix for each:
+  
+  - FROM `?package=X` or `/meta/api/<X's namespace>/<name>` for an api X does not hold TO `?package=<holder id>` or `/meta/api/<holder's namespace>/<name>` (the refusal names the holder).
+  - FROM `/meta/api/_env/<name>` for a package's api TO `/meta/api/<its namespace>/<name>`.
+  - FROM a bare read of a two-holder api name TO `?package=<id>` or `/meta/api/<namespace>/<name>`.
+- e40f2df: fix(metadata): two packages' same-named `agent` or `skill` items are both kept in the metadata service, and a read naming one package gets that package's own (ADR-0150 D3/D4)
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  Skills-docs: none — `skills/**` and `content/docs/**` teach no in-process `get('agent' | 'skill', …)` and no `/layers?package=` read of an agent or skill; the refusal names every holder to address.
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no metadata shape, schema, stored row or registered node type changes: the change is that the metadata service's in-memory store keeps each package's agent and skill item under its own (package, name) slot, and which item a by-name read of it answers; the stored metadata is read exactly as before, so there is nothing for `objectstack migrate meta` to rewrite -->
+  
+  The metadata service kept its in-memory `agent` and `skill` items by bare name. Since #31701 two packages of two namespaces may each install the same agent or skill name, and on the artifact boot (`os dev`, `os start`), where every package body's items are registered with the metadata service, the package registered last overwrote the other. The metadata service then answered every read of that name with the survivor, and `GET /api/v1/meta/agent/NAME/layers?package=FIRST` (the first package's id) answered `200` with the other package's code and effective layer, stamped with the other package's id. Each package's agent and skill item now has its own `(package, name)` slot, as `api` already has (#32092): a read naming a package answers that package's item and never another's, and both items are listed. For items that carry `packageId`, removing one package's items leaves the other's. With one package holding a name, every read naming no package or naming the holder answers exactly as before; a read naming another package is item 2 below.
+  
+  Fixed: `GET /meta/agent/NAME/layers?package=PKG` and `GET /meta/skill/NAME/layers?package=PKG`, for a name two packages hold, on an artifact boot: FROM the other package's body (code and effective layer, `packageId` the other package) TO that package's own body.
+  
+  **BREAKING** for two in-process answers of the metadata service (first-party count: 0, since no example app declares an agent or skill):
+  
+  1. `get('agent' | 'skill', name)` and `getDiagnosed(…)` naming no package, for a name two packages hold: FROM the item of the package registered last TO a `409 RESOURCE_CONFLICT` refusal (`PackageScopedNameRefusedError`, reason `ambiguous-in-environment`) naming both holders, the shape `get('api', name)` took in #32092.
+  2. `get('agent' | 'skill', name, PKG)` and `getDiagnosed(…, PKG)`, where `PKG` holds no slot of the name and another package does (one holder or more): FROM the stored item (the one holder's, or the survivor of two) TO `undefined`, and `{ data: undefined, degraded: false, errors: [] }` from `getDiagnosed`; no loader is asked in its place.
+  
+  On a booted stack no HTTP or MCP door moves from served to refused: `/meta`, `/layers`, `/published` and MCP `prompts/get` read through the protocol, which already refused the bare read of a two-holder name on all four, and a `/meta` or `/layers` read naming a package that does not hold the name (`409`, ADR-0150 D5; measured byte-identical before and after). A host with no merged protocol read, where the MCP agent and skill reads fall back to the metadata service, now gets item 1's refusal where it was served the survivor.
+  
+  The fix for each:
+  
+  - FROM `get(type, name)` of a two-holder name TO `get(type, name, PKG)`, a package the refusal names.
+  - FROM `get(type, name, PKG)` for a package that does not hold the name TO `get(type, name, HOLDER)`, the holding package (the bare read's refusal, or `list`, names it).
+  
+  Also visible: `list('agent' | 'skill')` and `GET /meta/agent` (and `skill`) list a two-holder name's items in registration order where they listed the survivor alone (the service) or the survivor first (REST). The realtime event of the second holder's first register is `metadata.TYPE.created`, where it was `metadata.TYPE.updated` (the overwrite).
+- 8080763: fix(metadata)!: removing one package's item of a name another package also holds removes only that package's item, and a removal naming no package of such a name is refused (ADR-0150 D3/D4)
+  
+  Clause-②: no (narrowing) — `MetadataManager.unregister(type, name)` naming no package refuses (`409` `RESOURCE_CONFLICT`, `ambiguous-in-environment`) a removal it carried out before: one of a name two packages hold, for a type stored per package. `unregisterPackage` newly removes the items the artifact door registers, and a writable loader's row of a name is deleted only with the package whose item it holds. The added surface is optional and in-process only: `options.packageId` on `MetadataManager.unregister` (with its `MetadataUnregisterOptions` type), and an optional third argument on `MetadataLoader.delete` (with its `MetadataLoaderDeleteOptions` type). No spec schema, contract or wire shape changes.
+  Metadata-protocol: none
+  Skills-docs: none — `skills/**` teaches neither `unregister` nor `unregisterPackage` (grep: none); `content/docs/kernel/contracts/metadata-service.mdx` excerpts the spec `IMetadataService`, whose signatures this change does not touch.
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no stored value or stored format changes: the in-process removal API answers differently for names two packages hold, the types it adds are optional, and the realtime field it fills is one `MetadataEventSchema` already declares. Nothing at rest records the old answer, so there is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** for in-process callers of `@objectstack/metadata`'s `MetadataManager` removal methods, and for implementors of `MetadataLoader.delete`. "A type stored per package" is a member of `PACKAGE_SLOTTED_STORE_TYPES` (today `api`, `agent` and `skill`), whose in-memory items are kept per `(package, name)`.
+  
+  What moves, and what to write instead:
+  
+  - **`unregisterPackage(P)` and the artifact door's items.** FROM: it removed only items carrying `packageId` or `package`, so an item carrying only the registry's `_packageId` stamp (every item the artifact door registers) stayed registered and stored. TO: it removes those too, for every metadata type; for a type stored per package it removes only P's item of each name and keeps every other package's. Fix: none for a caller that meant to remove the package; a caller that relied on such items surviving re-registers them after the call. First-party production callers: 0 (objectql's `MetadataFacade.unregisterPackage` clears `SchemaRegistry` and does not reach this class).
+  - **The stored row of a name two packages hold.** FROM: removing package P's item of a type stored per package deleted the writable `datasource:` loader's row of the name, whichever package's item the row held. TO: `DatabaseLoader` deletes the row only when it holds P's item (its `package_id` column, else the stored body's `packageId` or `_packageId`), and keeps a row that holds another package's item or one it cannot attribute. Fix: none; to remove every package's item of the name, remove each package's. First-party production boots wiring a `DatabaseLoader`: 0.
+  - **`unregister(type, name)` naming no package.** FROM: for a name two or more packages hold, of a type stored per package, it removed every package's item and the name's stored row. TO: it throws `PackageScopedNameRefusedError` (`code` `RESOURCE_CONFLICT`, `status` `409`, `refusal.reason` `ambiguous-in-environment`, `refusal.candidates` naming every holder) and removes and announces nothing; `bulkUnregister` reports it in that item's `errors`. A name at most one package holds, and every type not stored per package, is removed as before. Fix: pass the package, `unregister(type, name, { packageId })`, which removes only that package's item, or call `unregisterPackage(packageId)`. First-party production call sites on a type stored per package: 0 (the six production `unregister` sites remove `object`, `datasource`, `permission` and `position`).
+  - **The realtime `metadata.<type>.deleted` event.** FROM: it named the item only. TO: a removal of one package's item of a type stored per package carries that package as `packageId`, the field `MetadataEventSchema` declares; a removal naming no package, and every other type, still names none. Of today's types stored per package only `agent` has a realtime event type. So a `subscribeMetadata('agent', …, { packageId: P })` subscription now receives the `deleted` event of P's agent, which its package filter dropped before. Fix: none; a subscriber that does not want it filters on `event.type`. First-party `subscribeMetadata` callers: 0.
+  - **`MetadataLoader.delete?(type, name, options?)`.** FROM: `delete(type, name)`. TO: an optional `options.packageId`, passed only when one package's item of a type stored per package is removed; the loader deletes its row of the name only when it holds that package's item. Fix: a loader that ignores the argument deletes by name, as before, and compiles unchanged. First-party implementors called with it: `DatabaseLoader`, the only writable `datasource:` loader in the tree.
+  
+  **Unchanged.** The watcher event (`subscribe(type, …)`, spec `MetadataWatchEventSchema`) names the item only: the spec declares no package field on it. A type outside `PACKAGE_SLOTTED_STORE_TYPES` keeps one item per name, and `unregister(type, name, { packageId })` removes it whatever package is named. The artifact door's in-memory loader is not deleted from: once every package's item of a name is removed, reads of the name are still served the body registered last, as before this change.
+- Updated dependencies [7d0b47c]
+- Updated dependencies [f6a429b]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [486b0a9]
+- Updated dependencies [9ed2ee1]
+- Updated dependencies [769adff]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [771b2db]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [f19fbb8]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [af3451b]
+- Updated dependencies [3a27208]
+- Updated dependencies [0c666c3]
+- Updated dependencies [38717d3]
+- Updated dependencies [ac890f5]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [25fea77]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [2046d21]
+- Updated dependencies [243eba1]
+- Updated dependencies [fd749a4]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [60fe44f]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [f7afab8]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [590724f]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [d5f3bc5]
+- Updated dependencies [e3948ae]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [1c5cee6]
+- Updated dependencies [aad1603]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [a59d00a]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [badf24d]
+- Updated dependencies [5268f50]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [c77dd17]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [8847e09]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [293a85b]
+- Updated dependencies [ed4b832]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [e735425]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [f4b4c8a]
+- Updated dependencies [db50231]
+- Updated dependencies [0e1311d]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [b6e6545]
+- Updated dependencies [90457e7]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [59630d9]
+- Updated dependencies [5e85952]
+- Updated dependencies [ef4af73]
+- Updated dependencies [7e697ff]
+- Updated dependencies [d9a232f]
+- Updated dependencies [3487ccc]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [5b7269f]
+- Updated dependencies [6dd196d]
+- Updated dependencies [d834a36]
+- Updated dependencies [0cd594b]
+- Updated dependencies [c62e72a]
+- Updated dependencies [450bfb6]
+- Updated dependencies [36a8700]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [5a8dbc7]
+- Updated dependencies [fb94249]
+- Updated dependencies [e627eaa]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [8fca8f7]
+- Updated dependencies [26d30d7]
+- Updated dependencies [3684d18]
+- Updated dependencies [d9f626b]
+- Updated dependencies [1a66fcf]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [f00fb1b]
+- Updated dependencies [c655af8]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [aad7d2f]
+- Updated dependencies [4f6fb53]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [7aab601]
+- Updated dependencies [de6d893]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [5d4f2aa]
+- Updated dependencies [133f75a]
+- Updated dependencies [f4cd4ec]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [e1dac19]
+- Updated dependencies [3299873]
+- Updated dependencies [44a030b]
+- Updated dependencies [21510bb]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [5210acf]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [63a470a]
+  - @objectstack/spec@18.4.0
+  - @objectstack/core@18.4.0
+  - @objectstack/metadata-core@18.4.0
+  - @objectstack/types@18.4.0
+  - @objectstack/metadata-fs@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes

@@ -1,5 +1,401 @@
 # @objectstack/client
 
+## 18.4.0
+
+### Patch Changes
+
+- c17719d: feat(rest)!: the metadata list reads several items by name in one request (`?names=a,b,c`), and refuses a query parameter it does not read
+  
+  Clause-②: yes (narrowing) — `GET /api/v1/meta/:type` (and its environment-scoped twin, on both the REST server and the runtime dispatcher) declares its closed query-parameter set, `package`, `preview`, `object`, `include`, `id`, `names` and `locale`, and refuses any other name with `400 VALIDATION_ERROR`, where it ignored it and answered the whole list with `200`. The widening half: `?names=a,b,c` narrows every type's list but `package`'s to the items of those names, `@objectstack/client`'s `meta.getItems(type, { names })` sends it, and `@objectstack/rest` exports three new names, the list's query decision that both transports ask: `META_LIST_QUERY_PARAMS`, `metaListQueryRefusal` and `metaListNames`. Ruling 6580261740 assigns both halves to this one server change.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped: `GetMetaItemsRequestSchema.names` was already declared, and only its description loses the planned marker. What moves is the list route's answer to a query-string name it never read, and nothing at rest records that answer, so there is nothing for a migration to rewrite. -->
+  
+  **The batch by-names read.** `GET /api/v1/meta/:type?names=a,b,c` answers only the items of those names, among the items the list would answer without it, on every metadata type except `package`, whose items are keyed by id and carry no `name`: the `package` list refuses `?names=` with `400 VALIDATION_ERROR`. One comma-separated value, as the data routes spell `fields`; each name is trimmed and repeats count once. A name that matches no item is simply absent from the answer (no `404`). The names are handed to the store read (`GetMetaItemsRequest.names`), so `@objectstack/metadata-protocol`'s `getMetaItems` filters before it computes locks, governance and diagnostics, and the list's per-caller gate, object field mask and translation run on the named items only. A value that names no item (`?names=`, `?names=,`) is refused with `400 VALIDATION_ERROR` rather than read as every item; leave the key out to list every item. A repeated `?names=` is refused like the list's other single-valued parameters. Before, `?names=` was ignored, so a client that needed several objects paid one by-name request for each.
+  
+  **BREAKING** accept-set narrowing at the metadata list (`@objectstack/rest`, `@objectstack/runtime`): a query parameter the list does not read is refused instead of ignored.
+  
+  - **Before.** `GET /meta/object?name=account`, `?ids=a,b` or `?filter=x` answered `200` with every object, which reads the same as a filter that matched everything.
+  - **Now.** A name outside `package`, `preview`, `object`, `include`, `id`, `names`, `locale` is refused with `400` and the nested `{ "error": { "code": "VALIDATION_ERROR", "message" } }` body; the message names the parameter and lists the supported ones, and nothing is read. A bracketed `?package[]=`, and `?id[]=` on the app list or `?object[]=` on the view list, keep their own located refusal; any other bracketed key (`?names[]=`) is refused as a name the list does not read.
+  - **Who moves.** The Console and the client SDK send only declared names. A script that sends another name gets the 400.
+  
+  **The remedy.** Drop the parameter, or spell it as one of the supported names: `?names=a,b` for several items by name, `?id=APP` for one app, `?object=OBJECT` for one object's views, `?package=ID` for one package.
+- 2046d21: feat(objectql,rest)!: a new assignment to a banned user is refused, and a banned user's records can be counted and handed over in bulk (#30205)
+  
+  Clause-②: yes (narrowing) — the published `FieldErrorCode` enum gains the member `reference_user_banned`. A non-system create or update that sets a user field (the owner field, a `user` field, or a `lookup` to `sys_user`) to a user whose ban is in force is refused `400 VALIDATION_FAILED` with that field code, a write that answered `201` / `200` before. A value the row already stores is not judged, so a record that already holds the banned user stays editable. The two new routes and SDK methods are additions.
+  Metadata-protocol: none
+  Skills-docs: no move in `skills/**`, which teaches no user-assignment verdict; `content/docs/permissions/administrator-guide.mdx` gains "Handing over a banned user's work" and its offboarding quick path points at it.
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any authorable schema is added, removed, renamed or re-shaped. What moves is the answer a data write gets when it names a banned user, and a record that already holds one is not judged, so nothing at rest needs rewriting. The new field code is a member of the response vocabulary FieldErrorCode, not of anything an author writes. -->
+  
+  **BREAKING** accept-set narrowing at every data write door (`POST` / `PATCH /api/v1/data/OBJECT`, batch, import, and a flow's elevated record write, which keeps the reference check): banning a user signs them out, but the records they own and are assigned stay where they were, and new work could still be handed to them.
+  
+  - **Before.** The Console's person picker hid a banned user, but `POST /api/v1/data/OBJECT` with `assignee` set to that user answered `201`, so new work landed on someone who cannot sign in.
+  - **Now.** The write-time reference check also asks whether a referenced user's ban is in force (`banned` is true and `ban_expires` is empty or still ahead) and refuses such a value with `reference_user_banned`, beside `reference_not_found`. It is read the way the existence probe reads, so a caller who cannot read the user object is refused the same way. A ban whose expiry has passed is not in force.
+  - **Unchanged.** A value every row of the write already stores (an edit form carries the whole record back), a system write the reference check already exempts (seed, install, restore), and a missing user (still `reference_not_found`).
+  - **New: the count.** `GET /api/v1/security/users/ID/assigned-work` (`client.security.assignedWork.count`) answers, per object and user field, how many records hold the user, counted under the caller's own context. Platform tables (`sys_*`), `managedBy` objects and `readonly` / `system` fields such as `created_by` are not counted; objects the caller cannot read are listed in `unreadable`; at most 200 fields are counted (`truncated`).
+  - **New: the hand-over.** `POST /api/v1/security/users/ID/assigned-work/transfer` (`client.security.assignedWork.transfer`) with `{ toUserId, objects? }` moves up to 500 records per call to an active user, each as an ordinary update under the caller's context, and answers per field what moved and what failed, plus how many remain. A banned, unknown or identical `toUserId` is refused before any write. Multi-valued user fields are counted but not transferred. Neither route touches the ban.
+  - **`@objectstack/spec`.** `FieldErrorCode` gains `reference_user_banned`, with its message in `en`, `zh-CN`, `ja-JP` and `es-ES`.
+  
+  **For a caller.** A write that names a banned user in a user field names an active one instead; the refusal names the field and the user. No stored metadata or row changes, so there is nothing for `objectstack migrate meta` to rewrite. An integration that reassigns work after a ban can call the transfer route and repeat it while `remaining` is above 0.
+- d4a8439: feat(rest): the recycle bin has REST doors: list an object's entries, restore one, purge one, and empty the object's bin; a delete answer names the entry to undo
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: semantic
+  Skills-docs: follow-up #30847
+  
+  The recycle bin (ADR-0148) is now reachable over HTTP, one object at a time, under the data surface:
+  
+  - **`GET /api/v1/data/:object/recycle-bin`** lists the object's entries, newest first (`limit` 1 to 200, default 50; `offset`). It is the recycle-bin manager's: a caller without `manageRecycleBin` on the object is refused `403`. Each entry's rows carry only the fields the caller may see on their object; a field the caller sees masked is left out.
+  - **`POST /api/v1/data/:object/recycle-bin/:entryId/restore`** writes one entry back. A member restores the entries they deleted (`allowRestoreOwnDeleted`); another member's entry needs `manageRecycleBin`. The four `409` refusals carry the entry, row and parent they name, so a client can restore a parent entry first.
+  - **`DELETE /api/v1/data/:object/recycle-bin/:entryId`** purges one entry, and **`DELETE /api/v1/data/:object/recycle-bin`** empties the object's bin. Both need `manageRecycleBin`.
+  
+  An entry addressed under an object it does not belong to answers `404`. Each door refuses an unknown or repeated query parameter `400`. An object whose API exposure withholds `delete` withholds the four doors too (`405`): the API derivation now derives `restore` and `purge` from `delete`.
+  
+  `DELETE /api/v1/data/:object/:id` answers `recycleBinEntryId` (optional on `DeleteDataResponseSchema`) when the delete wrote a recycle-bin entry, so a client can offer an undo. The engine's by-id `delete` tells an `onRecycleBinEntry` callback (`RecycleBinDeleteObservability`, exported by `@objectstack/objectql` beside `EngineDeleteOptions`, as update's `WriteObservabilityOptions` are) the entry it wrote, once the driver reports the row removed.
+  
+  The engine gains `ObjectQL.listRecycleBin(object, { context, limit, offset })`, refused unless the caller manages the object's bin (fail closed when no permission resolver answers), and `restore` / `purge` take an optional `object` that an entry must belong to. `@objectstack/client` gains `client.recycleBin.list / restore / purge / empty`, and `DeleteDataResult` gains `recycleBinEntryId`.
+- 0cba0ce: feat(rest, client): a tenant-admin REST door for the record-currency code backfill
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  An organization admin with no shell on the deployment can now run the record-currency code backfill (`os migrate record-currency-codes`) over HTTP: `POST /api/v1/meta/_migrate-record-currency-codes` with `{ object, field, code, apply? }`, or `client.meta.migrateRecordCurrencyCodes(...)` from the SDK.
+  
+  - It fills the codeless rows of **the caller's current organization only**. There is no environment-wide form, and the body takes no organization: `organizationId`, `allOrganizations` or any other key outside the four is refused with `VALIDATION_ERROR` / 400. A request with no current organization is refused `403 FORBIDDEN`.
+  - It requires `setup.write` in that organization (`403 FORBIDDEN` otherwise), and it is mounted behind `metadata.endpoints.maintenance` with the other maintenance routes.
+  - Preview unless `apply` is `true`. The answer is the report the CLI prints under `--json`, and the code, field and object refusals are the CLI's.
+  - The SDK method answers `unknown`: the report's named type lives in `@objectstack/objectql`.
+  - The 409 `destructive_change` finding `currency_mode_to_record` now names this route beside the CLI command.
+  - `@objectstack/objectql` now exports `RecordCurrencyBackfillOrganization` and `RecordCurrencyBackfillOrganizationsRefusal` from its entry.
+  - A backfill walk stopped by `--max-records` no longer prints "nothing to backfill" for rows it did not examine. It says the walk is incomplete, and an unscoped run says its organization check saw only the rows examined.
+  - A backfill row whose write a sandboxed hook refused now reports the hook's own sentence, not the `hook '<name>' threw:` debug wrapper, and a crashed hook's row reports the write doors' withheld fault sentence. The operator's log line keeps the whole text.
+- 6bd00d2: feat(client): `client.oauth.authorizedClients.list()` and `.listForUser(userId)` read the AI assistants a person has authorized and when each was last used
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  `list()` calls `GET /api/v1/auth/authorized-clients` with no parameter: the caller's own grants. `listForUser(userId)` calls `GET /api/v1/auth/admin/authorized-clients?userId=...` and is answered for a platform administrator only. Both unwrap the `{ success, data }` envelope to the new exported `AuthorizedClientsList` type, `{ clients: AuthorizedClient[]; truncated: boolean }`. `AuthorizedClient.lastUsedAt` is an hour start, `null` when no use has been recorded. A refusal throws, as every other method does. Nothing existing changes.
+- e11a575: feat(auth): withdraw an authorized AI assistant, for the person themself and for a platform administrator
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  Two new routes beside the authorized-clients reads, each keyed by the consent `id` those reads answer on every row:
+  
+  - `POST /api/v1/auth/authorized-clients/withdraw` with `{ "id": "…" }` withdraws one of the signed-in person's own authorized assistants. Only that person's grant is withdrawn: an id that names someone else's grant answers `404 RESOURCE_NOT_FOUND`, byte for byte the same as an id that names nothing, and leaves it in place.
+  - `POST /api/v1/auth/admin/authorized-clients/withdraw` with `{ "userId": "…", "id": "…" }` does the same for a person a platform administrator manages, behind the same gate as `GET /api/v1/auth/admin/authorized-clients`: anyone else is refused once (`401` anonymous, `403 PERMISSION_DENIED` otherwise), whoever the body names and whether or not the person or the grant exists.
+  
+  A withdraw revokes the grant the way `/oauth2/revoke` does: the consent row, then the client's refresh tokens. The assistant's token is refused on its next MCP call, and it must be authorized again to reconnect. Both routes take a closed body (an unknown key, or a missing or empty value, is `400 VALIDATION_ERROR`) and no query parameter, and answer `{ success: true, data: { id } }` with `Cache-Control: no-store`.
+  
+  `@objectstack/client` adds `oauth.authorizedClients.withdraw(id)` and `oauth.authorizedClients.withdrawForUser(userId, id)`, both answering `AuthorizedClientWithdrawal` (`{ id }`).
+  
+  better-auth's own `POST /api/v1/auth/oauth2/delete-consent` is unchanged and stays outside the SDK: it answers an unknown id and another person's id differently, and leaves the refresh tokens behind. Use the new routes instead.
+- e735425: feat(security): read one user's effective permission sets, each with where it comes from
+  
+  Clause-②: yes
+  Metadata-protocol: none
+  
+  A user page could list only the permission sets stored as that user's own grant rows. Sets that arrive through the `everyone` default binding or through a held position were never rows, so a user who holds plenty of access through defaults and positions showed none. Now one read lists them all, each with its origins.
+  
+  - **`GET /api/v1/security/users/:id/effective-access`** (`@objectstack/rest`, beside `security/explain`) answers the spec's `EffectiveAccess`: the user, the organization it was resolved in, the positions held there, and the permission sets in force, each listed once with every origin it arrives through (`direct`, `position` with the position's name, `default`, or `derived` with its standing). It takes no query parameter: one is refused `400 VALIDATION_ERROR` naming it. A deployment whose security service does not serve the read answers `501`.
+  - **Who may read whom is explain's caller gate**, now one function both reads call (`mayDescribeAnotherUser` in `@objectstack/plugin-security`): your own access always; someone else's with `manage_users`, as the organization administrator of an organization they belong to, or with a delegated `adminScope` covering them. An id no user has is refused with the same `403 PERMISSION_DENIED`, word for word, as a user you may not manage, for every caller. This is where the read differs from `security/explain`, which answers an admitted caller `404` for an unknown id.
+  - **`ISecurityService.describeEffectiveAccess`** is served by `@objectstack/plugin-security`. The origins come from the resolver itself: `resolveUserAuthzGrants` (`@objectstack/core`) takes a new `withPermissionOrigins` option and returns `permissionOrigins`, recorded where each name is derived. Asking for it is a fresh resolution, like explain's. A resolution that does not ask returns the same envelope as before, from the same reads.
+  - **`client.security.describeEffectiveAccess(userId)`** (`@objectstack/client`) returns `EffectiveAccess`.
+- 0c0ede0: fix(client): `subscribeData` delivers `data.record.restored`, reading its event types from the spec
+  
+  Clause-②: yes (widening) — `RealtimeAPI.subscribeData` now delivers every per-record event type the spec's `DataEventType` declares, which adds `data.record.restored` (a row restored from the recycle bin) to the created / updated / deleted it delivered before. `subscribeBulkData` reads `BulkDataEventType` the same way; its two types are unchanged.
+  Metadata-protocol: none
+  
+  `subscribeData` asked for a hand-written list of created / updated / deleted, so when `data.record.restored` joined `DataEventType` the subscription filtered it out, and a subscriber's live list never saw a restored row come back. Both data subscriptions now take their event types from the spec enums (`DataEventType.options`, `BulkDataEventType.options`), so a type the spec adds later reaches subscribers without a client edit. A callback that switches on `event.type` will now also see `data.record.restored`, whose payload carries the restored row in `after`.
+- 22ee4c4: fix(rest)!: `GET /api/v1/meta/_drafts` scopes by `?package=`, like every other metadata read, and refuses a query parameter it does not read
+  
+  Clause-②: yes (narrowing) — `GET /api/v1/meta/_drafts` (on the REST server and the runtime dispatcher) declares its closed query-parameter set, `package` and `type`, and refuses any other name, the retired `packageId` among them, with `400 VALIDATION_ERROR`, where it ignored it and answered the drafts of every package with `200`. The widening half: `@objectstack/rest` exports two new names, the door's query decision that both transports ask: `META_DRAFTS_QUERY_PARAMS` and `metaDraftsQueryRefusal`.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped: the protocol's ListDraftsRequest keeps its packageId field, and the SDK options keep their names. What moves is the drafts route's query-string spelling, and nothing at rest records it, so there is nothing for a migration to rewrite. -->
+  
+  **The package filter.** `GET /api/v1/meta/_drafts?package=ID` lists only that package's pending drafts. It reads the value the way `GET /meta/:type` and `GET /meta/diagnostics` read it: `?package=all` lists every package, and a package that is neither installed nor bound to a pending draft is refused with `400 INVALID_REQUEST`. Before, the door read only `?packageId=`, so `?package=ID` was dropped and every package's drafts came back with `200`.
+  
+  **BREAKING** accept-set narrowing at the drafts list (`@objectstack/rest`, `@objectstack/runtime`): a query parameter the door does not read is refused instead of ignored, and `?packageId=` is retired.
+  
+  - **Before.** `GET /meta/_drafts?packageId=ID` narrowed to one package. `?package=ID`, `?typ=view` or any other name was ignored, and the drafts of every package (or every type) came back with `200`.
+  - **Now.** Only `package` and `type` are read. Any other name, `packageId` included, is refused with `400` and the nested `{ "error": { "code": "VALIDATION_ERROR", "message" } }` body, whose message names the parameter and lists the supported ones; nothing is read. A bracketed `?package[]=` or `?type[]=` keeps its own located refusal.
+  - **Who moves.** `@objectstack/client`'s `meta.listDrafts({ packageId })` and `@object-ui/data-objectstack`'s `MetadataClient.listDrafts({ packageId })` keep their option name and now send `?package=`, as does the Console. A script that sends `?packageId=` gets the 400.
+  
+  **The remedy.** FROM `GET /api/v1/meta/_drafts?packageId=ID` TO `GET /api/v1/meta/_drafts?package=ID`. Upgrade `@objectstack/client` and `@object-ui/data-objectstack` together with the server.
+- f9eaba2: feat(client): `automation.*`, `actions.invoke` and `meta.getItem` take an optional `namespace` and send the qualified address (ADR-0150 D5)
+  
+  Clause-②: yes (widening) — the by-name calls of `@objectstack/client` gain an optional `namespace` (the holding package's manifest `namespace`, or `'_env'` for an item authored in the environment) and build the qualified path the server's doors already read: `/automation/:ns/:name[/…]`, `/automation/trigger/:ns/:name`, `/actions/:ns/:object/:action` and `/meta/:type/:ns/:name`. The package entry exports the `QualifiedAddressOptions` and `ActionInvokeResult` types. Without a namespace every call sends exactly the request it sent before.
+  Metadata-protocol: none
+  
+  **Addressing an item by its package.** When two installed packages ship a flow, an action or a metadata item under the same name, the bare call is refused by the server, and these calls can now name the package that holds it:
+  
+  - `automation.trigger`, `get`, `update`, `delete`, `toggle`, `clone`, `runs.get`, `getFlow`, `execute`, `getRun`, `resume` and `getScreen` take a trailing `{ namespace }`; `runs.list` and `listRuns` take `namespace` beside `limit`.
+  - `actions.invoke` and `actions.invokeGlobal` take `namespace` beside `recordId` and `params`.
+  - `meta.getItem` takes `namespace` beside `packageId`.
+  - The twins on `client.environment(id)` (`meta.getItem`, `automation.getFlow`, `execute`, `listRuns`, `getRun`, `resume`, `getScreen`) take the same.
+  
+  **A `409` keeps its candidates.** The server picks no holder: a name it cannot resolve to one item is answered `409 RESOURCE_CONFLICT`. The `automation.*` and `meta.getItem` calls reject with it, and the error's `details.candidates` lists every holder (`{ kind: 'package', packageId }`). `actions.invoke` and `invokeGlobal`, which return their failures instead of throwing, now carry those candidates on the result as `candidates`.
+  
+  **Addresses with no qualified path are refused before sending.** The server reads the segment after each door in a fixed order (the door's literals, then `_env`, then an installed namespace, else the bare address), so some pairs would be read as another request: a namespace outside the package-namespace grammar, a namespace that spells a door literal (`trigger` on `/automation`, `global` on `/actions`), a flow named like a flow sub-resource (`runs`, `toggle`, `clone`, `trigger`) under a package namespace, a flow named like a door literal under any namespace, and a metadata item named like a `/meta` sub-resource (`history`, `tree`, …). Each is refused with `code: 'VALIDATION_ERROR'` and `httpStatus: 400` (on `actions.*`, as `success: false`) and nothing is sent. Call such a flow bare, and read such a metadata item with `packageId`.
+  
+  `meta.getHistory`, `getReferences`, `getAudit` and `diffItem` take no `namespace`: their server routes read no package.
+- 732def5: docs(client, cli): `environments.activate` and `os environments switch` no longer say the server writes the session's active environment
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  The control plane's `POST /api/v1/cloud/environments/:id/activate` reads the environment, confirms the caller is a member of it and writes no server state (it answers `sessionUpdated: false`). The SDK's `environments.activate` jsdoc, the environments endpoint list, the comments of `os environments switch` and `os environments create`, and the `--remote` flag description of `os environments switch` all said it updated the server-side session. They now say what happens: the call confirms access, and the active environment lives only in the CLI's local credentials (`~/.objectstack/credentials.json`, and `~/.objectstack/cloud.json` where that control plane is the one recorded there). `os environments switch --no-remote` now prints `(local only — /activate was not called)` in place of `(local only — server session unchanged)`. No behaviour changes.
+- 3191e00: fix(runtime, rest): the `/meta` door's `409 RESOURCE_CONFLICT` carries `details.candidates`, as `/automation` and `/actions` do (ADR-0150 D5)
+  
+  Clause-②: yes (widening) — an additive `details.candidates` member on an existing refusal; no answer that succeeds changes, and the message is the one it was.
+  Metadata-protocol: none
+  
+  When a by-name metadata read names no one item (a bare name two packages hold, `?package=` of a package that holds none of it while another does, `/meta/:type/:ns/:name` under such a namespace or a shareable namespace both owners hold, `/meta/:type/_env/:name` for a name only packages hold), the `409 RESOURCE_CONFLICT` now lists every holder as `details.candidates`: the `PackageScopedHolder` list (`{ kind: 'package', packageId }`, `{ kind: 'environment' }`, `{ kind: 'platform' }`) the `/automation` and `/actions` doors already answer. Both transports answer it: the runtime dispatcher's `/meta` domain in its nested envelope (`error.details.candidates`), and `RestServer` beside its flat body's `error` and `code` (`details.candidates`). Before, the holders were named in the message only.
+  
+  `client.meta.getItem` rejects with them on `err.details.candidates`, so a console or an integration can retry with the holder it means instead of parsing the sentence. The holders are the ones the message already named; a caller the type-level read admission refuses is still answered `403` before any address is read.
+- bb47215: fix(plugin-auth)!: an account with an enrolled second factor is signed in by no one-time code or sign-in link alone
+  
+  Clause-②: no (narrowing) — the one-time-code and link doors (`/phone-number/verify`, `/magic-link/verify`, and `/verify-email` when it signs the user in) answer an account with an enrolled second factor with the two-factor challenge password sign-in gives, and issue its session only after the second factor. No request, response or metadata shape is added, removed or re-shaped; an account with no enrolled factor signs in at these doors exactly as before.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export or type changes. What moves is which answer an enrolled account gets at three sign-in doors, the existing two-factor challenge, so there is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** sign-in narrowing at the one-time-code and link doors (`@objectstack/plugin-auth`): a code or link door asks an enrolled account for its second factor, as password sign-in does.
+  
+  - **Now.** For an account with an enrolled second factor, `POST /phone-number/verify`, `GET /magic-link/verify` and `GET /verify-email` (with `emailVerification.autoSignInAfterVerification`) answer `{ "twoFactorRedirect": true, "twoFactorMethods": [...] }` with the pending two-factor cookie and no session, as `POST /sign-in/email` does; on the link doors' `callbackURL` redirect lane no session is issued either. The session is issued by `/two-factor/verify-totp`, `/two-factor/verify-otp` or `/two-factor/verify-backup-code`, and a valid trust-device cookie skips the challenge as it does at password sign-in. A call that issues no new session is unchanged: `/phone-number/verify` with `disableSession: true` or `updatePhoneNumber: true`, and `/verify-email` for a caller already holding the session it answers with.
+  - **Who moves.** A client of a code or link door that signs in an account with an enrolled second factor: it now completes the two-factor challenge (read `twoFactorRedirect`, then verify the second factor) before it holds a session. Accounts with no enrolled factor, and deployments with two-factor off, change nothing.
+  
+  `@objectstack/client`: the `AuthEmailVerificationResult.status` documentation now says a `/verify-email` request that would sign in an enrolled account answers the two-factor challenge instead of the receipt; no type changes.
+  
+  **Fails closed on vendor drift.** Building the auth instance throws when the installed two-factor plugin no longer exposes the password sign-in challenge these doors reuse, rather than starting with the doors open to a code or link alone.
+- f127b04: fix(plugin-auth)!: under invite_only, a self-serve sign-up is admitted only by the invitation it presents
+  
+  Clause-②: yes (narrowing) — under the `invite_only` audience posture an email-and-password sign-up for an invited address is admitted only when it presents that invitation's id as `invitationId`, and the address alone is refused `SELF_REGISTRATION_CLOSED`; a social OAuth creation is admitted by an invitation only when its identity provider verified the address. The sign-up request widens: `RegisterRequestSchema` and `RegisterRequest` gain `invitationId`, `SignUpData`, `RegisterForm` and the auth context's `signUp` gain it, and `os register` gains `--invitation`.
+  Metadata-protocol: added — RegisterRequest gains the optional invitationId key (packages/spec/authorable-surface/api.json)
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key is removed, renamed or re-shaped and no stored row is rewritten: RegisterRequest gains an optional key, and a sign-up under invite_only that does not present its invitation is refused with the posture's existing code and message. -->
+  
+  **BREAKING** accept-set narrowing at the email-and-password sign-up door (`@objectstack/plugin-auth`), under the `invite_only` audience posture, the default.
+  
+  A sign-up under `invite_only` presents the invitation it is admitted by: the invitation's id, the last segment of the `/accept-invitation/` link the invitation mail carries, sent in the `/sign-up/email` body as `invitationId` beside `email`, `password` and `name`. The invitation must be pending, unexpired and addressed to that email. Anything else is refused `403 SELF_REGISTRATION_CLOSED` with the same message an uninvited sign-up gets, and nothing is written.
+  
+  **Upgrading.** A client that signs an invitee up sends `invitationId` beside the `email`, `password` and `name` it already sends. The one-line fix: send the id the invitation link carries as `invitationId`.
+  
+  **Who moves.** Nothing in this repository: the Console, the SDK, the CLI, the `@objectstack/verify` harness and the test fixtures all present the id; a client outside it that signs invitees up under `invite_only`, such as a custom front-end or a script, sends the accept link's last path segment as `invitationId`.
+  
+  **Operators.** Deploy the Console bundle together with the server; on a deployment with no mail transport, hand the invitee the link with the invitation's **Copy Invite Link** action; give an out-of-band recovery invitation row an `id` of your own, which the sign-up sends; and review accounts created before the upgrade that are unverified and hold or accepted an invitation.
+  
+  - **Unchanged:** the first account of a new deployment, and the operator's own provisioning (admin create, SCIM, the boot command's seed), need no invitation. The `open` and `email_domain` postures match an invitation by address as before. A magic-link or email-OTP creation, whose own flow answers from the mailbox, matches by address; an SSO provider's creation is unchanged.
+  - **Social OAuth under `invite_only`:** a creation through a social provider is admitted by an invitation only when the provider verified the address; otherwise it is refused with the same code as an uninvited sign-up.
+  - **No mail transport:** hand the invitee the link with the invitation's **Copy Invite Link** action; it carries the id.
+  - `@objectstack/spec`: `RegisterRequestSchema` declares the optional `invitationId`.
+  - `@objectstack/client`: `auth.register()` sends it through, typed by the widened `RegisterRequest`.
+  - `@objectstack/cli`: `os register --invitation ID`.
+  - `@objectstack/verify`: the harness's `signUp` presents the invitation it seeds.
+  - `@object-ui/auth`: `SignUpData.invitationId`, `RegisterForm`'s `invitationId` prop and the sixth argument of the context's `signUp` send it.
+  - `@object-ui/console`: `/register` opened from an invitation link sends that link's id with the sign-up; so does `@object-ui/app-shell`'s `DefaultRegisterPage`, whose package now also exports `invitationIdOf`.
+- Updated dependencies [7d0b47c]
+- Updated dependencies [f6a429b]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [771b2db]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [f19fbb8]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [af3451b]
+- Updated dependencies [3a27208]
+- Updated dependencies [0c666c3]
+- Updated dependencies [38717d3]
+- Updated dependencies [ac890f5]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [25fea77]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [2046d21]
+- Updated dependencies [243eba1]
+- Updated dependencies [fd749a4]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [f7afab8]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [590724f]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [d5f3bc5]
+- Updated dependencies [e3948ae]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [1c5cee6]
+- Updated dependencies [aad1603]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [a59d00a]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [badf24d]
+- Updated dependencies [5268f50]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [c77dd17]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [ed4b832]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [e735425]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [90457e7]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [59630d9]
+- Updated dependencies [5e85952]
+- Updated dependencies [ef4af73]
+- Updated dependencies [7e697ff]
+- Updated dependencies [d9a232f]
+- Updated dependencies [3487ccc]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [5b7269f]
+- Updated dependencies [6dd196d]
+- Updated dependencies [d834a36]
+- Updated dependencies [0cd594b]
+- Updated dependencies [c62e72a]
+- Updated dependencies [450bfb6]
+- Updated dependencies [36a8700]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [5a8dbc7]
+- Updated dependencies [fb94249]
+- Updated dependencies [e627eaa]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [8fca8f7]
+- Updated dependencies [26d30d7]
+- Updated dependencies [3684d18]
+- Updated dependencies [d9f626b]
+- Updated dependencies [1a66fcf]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [f00fb1b]
+- Updated dependencies [c655af8]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [aad7d2f]
+- Updated dependencies [4f6fb53]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [7aab601]
+- Updated dependencies [de6d893]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [5d4f2aa]
+- Updated dependencies [133f75a]
+- Updated dependencies [f4cd4ec]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [e1dac19]
+- Updated dependencies [44a030b]
+- Updated dependencies [21510bb]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [5210acf]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [63a470a]
+  - @objectstack/spec@18.4.0
+  - @objectstack/core@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes

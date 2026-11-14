@@ -1,5 +1,602 @@
 # @objectstack/plugin-audit
 
+## 18.4.0
+
+### Minor Changes
+
+- b5eb61d: Clause-②: yes (widening) — `PLATFORM_OBJECTS_BY_PACKAGE['platform-objects']` (and so `PLATFORM_PROVIDED_OBJECT_NAMES` / `isPlatformProvidedObjectName`) lists one more real platform object, `sys_lifecycle_state`. Its readers resolve references against the roster and none refuses an author declaration, so a stack that references the object now resolves it instead of drawing the unknown-platform-name advisory; nothing that was accepted is refused.
+  Metadata-protocol: added
+  Skills-docs: none — `skills/**` and `content/docs/**` enumerate no platform object roster and teach nothing about the lifecycle sweep's schedule; the object is internal clock state with no data API, so there is nothing for an author to write against it.
+  
+  The lifecycle sweep remembers when it last completed, so a kernel that reboots onto an existing datastore no longer re-sweeps within a minute of every boot.
+  
+  `LifecycleService` now keeps a watermark in a new engine-owned, tenant-less object, `sys_lifecycle_state` (declared and registered by `@objectstack/platform-objects`, one row per datastore, id `lifecycle`). At the initial delay the scheduler reads that one row: when the last completed sweep is younger than the sweep interval, the first sweep waits for the interval and the read is the only statement issued. An older or missing watermark, a kernel without the object, or a read that fails (logged at `warn`) sweeps at the initial delay as before. Every sweep that completes with no policy error and a finished reference audit advances the row; a failed or partial sweep leaves it alone. A datastore the process created from empty still defers its first sweep one interval, and now seeds the row. A direct `sweep()` call still always sweeps.
+  
+  The row is internal state, not a setting: no settings key, no environment variable, no audit row per sweep and no data API (`apiEnabled: false`). `@objectstack/plugin-audit` leaves `sys_lifecycle_state` out of `sys_audit_log` and `sys_activity`, so a sweep writes no ledger row for its own clock. `OS_LIFECYCLE_DISABLED=1` still arms nothing. `os migrate organization-ownership` inventories the new table as deployment-level state with no organization column.
+- 25e1c1a: feat(objectql,platform-objects): a by-id delete keeps its rows in the recycle bin (ADR-0148): the `sys_recycle_bin` object, the snapshot on delete, the retention stamp and the TTL reap
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  Skills-docs: follow-up owed — skills/objectstack-api/SKILL.md :268, :417 (they teach that there is no recycle bin)
+  
+  The recycle bin's write side. A delete is still a physical delete, and no read path changed: the rows are gone from every query the moment the delete commits. What is new is the copy kept beside them. Restoring, purging and emptying the bin, the two grants that govern them and their REST doors are not in this release.
+  
+  - **`@objectstack/platform-objects`:** registers `sys_recycle_bin`, built from the spec's `RECYCLE_BIN_ENTRY_FIELDS`. One entry per delete operation. It is engine-owned, with no generic data-API method, because the snapshot holds every field of the deleted rows. Its tenant column cascades, so deleting an organization deletes its entries. The lifecycle sweep reaps an entry once its stamped `purge_after` has passed (`ttl` on `purge_after`, window `0h`), and asks no resolver.
+  - **`@objectstack/objectql`:** a by-id delete of a business record writes one entry in the delete's own unit of work, before the record's row is removed. The entry holds the record and its master-detail cascade, the master first. Each row keeps its declared columns, and `secret` columns are left out, so a restored record's secret fields come back empty. The entry also records the `set_null` references the delete cleared, and `deleted_by`, `deleted_at`, `retention_days` and `purge_after`. If removing the row fails, the entry goes too: the transaction rolls it back, or the engine removes it when no transaction covered it.
+  - **Retention:** `ObjectQLPlugin`'s new `recycleBinRetention: { resolve, token }` option takes the host's retention resolver, called once per delete with the token the host handed over. When the option is absent or the resolver answers `undefined`, the retention is `OS_RECYCLE_BIN_RETENTION_DAYS`, else 30 days. A value that is not a positive whole number of days is refused: from the resolver, the delete is refused before it writes anything; in the variable, the boot is refused, because the plugin reads it in `init()`.
+  - **Which deletes do NOT enter the bin:**
+    - a delete by predicate (`multi: true`), which includes every lifecycle sweep reap, even though the sweep names each reaped row by its id;
+    - a child the cascade deletes, which is a row of its root's entry instead;
+    - any platform object, meaning a `sys_*`, `cloud_*` or `ai_*` object, whose rows are also left out of a business record's snapshot;
+    - any delete on a composition that does not register `PlatformObjectsPlugin`, which logs one `info` line saying so.
+  - **Forward-only:** records deleted before this release have no entry.
+  - **Storage:** every by-id delete of a business record now also writes one `sys_recycle_bin` row holding the deleted rows. The row is reaped once its retention has passed.
+  - **`@objectstack/spec`:** `PLATFORM_OBJECTS_BY_PACKAGE['platform-objects']` lists `sys_recycle_bin`, so a reference to it lints as a real platform object. The comment above `RECYCLE_BIN_OBJECT` now names the object file that builds the table; no exported name, shape or description changed.
+  - **`@objectstack/cli`:** the organization-ownership inventory has a row for `sys_recycle_bin` (fate `attribution`).
+  - **`@objectstack/plugin-audit`:** `sys_recycle_bin` is excluded from the generic audit and activity writer, like the other engine-owned plumbing, so reaping an entry, clearing its `deleted_by` or cascading an organization's delete into its entries never copies a snapshot into `sys_audit_log` or `sys_activity`. The business delete an entry was taken for is audited exactly as before.
+- 4123865: fix(metadata-protocol,runtime): a seed row a person deleted is no longer inserted again under a new id by the next seed replay
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: semantic
+  
+  A seed replays long after its first load: on every boot of a single-tenant runtime (`objectstack serve`, `os start`) and per organization whenever a host replays the seed union, for example on a package upgrade. The create-only default (`mode` omitted, which is `ignore`) inserted every declared row it did not find, and `upsert` did the same. A row a person deleted therefore came back under a new id at the next replay.
+  
+  The seed loads AppPlugin runs now keep a per-organization record of which seed rows landed: the boot seed, the per-organization replay (the `seed-replayer` service) and the dev hot-reload seeder. The record is the new platform object `sys_seed_landed_key` (`SysSeedLandedKey`, registered by `PlatformObjectsPlugin`). It holds one row per landed key: the organization, the object, and the dataset's `externalId` fields with the values the row was matched by. The loader records every keyed row an `upsert` or `ignore` dataset lands, whether it inserted the row, updated it or matched it and left it alone. A row an earlier release seeded therefore counts as landed from the first load after the upgrade. A missing row is inserted only when its key never landed in that organization:
+  
+  - A deleted seed row stays deleted across reboots and upgrades. A row an upgrade adds to the seed still lands.
+  - An edited row is left as the person left it. Under `ignore` this includes a renamed key: the old name is not inserted again.
+  - A reference to a removed row is left as it is, and a row whose own key names a removed row is withdrawn with it. Nothing is reported unresolved for either, so a replay after a person's delete still loads clean.
+  - One `info` line per load says how many seed rows were not inserted again, and where.
+  
+  The deliberate re-seed is the `seed-replayer` service called with `{ reseed: true }`. It inserts every missing row, including the ones a person removed, and records them again. A new database starts with an empty record. Deleting an organization deletes its record.
+  
+  `SeedLoaderService` takes the record through a new constructor option, `landedKeys: 'honour' | 'reseed'`. A caller that does not pass it neither reads nor writes the record, so the package publish, marketplace install, reseed and purge doors behave as before. A load keeps no record when it seeds no organization, and says so at `info`. It also keeps none when the composition does not register `sys_seed_landed_key`, and says so at `warn`. A record write that fails is reported once at `error`. It fails neither the rows nor the load, and the next load records every row that is still present.
+  
+  `PLATFORM_OBJECTS_BY_PACKAGE['platform-objects']` in `@objectstack/spec` lists the new object, and so do `PLATFORM_PROVIDED_OBJECT_NAMES` and `isPlatformProvidedObjectName`, so a stack that references `sys_seed_landed_key` resolves it instead of drawing the unknown-platform-name advisory. `@objectstack/plugin-audit` leaves `sys_seed_landed_key` out of `sys_audit_log` and `sys_activity`: recording which seed rows landed writes no ledger row of its own, and the seeded rows stay audited. `os migrate organization-ownership` inventories the new table as organization-owned rows (fate 3, attribution), each written with the organization its load seeds.
+
+### Patch Changes
+
+- 171b6dd: fix(plugin-audit): the activity list opens newest first, without the platform's own rows, under a plain name and description
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - **`sys_activity` declares two list views.** `recent` comes first, so it is the list Home's "view all activity" and the bell's Activity tab open (both name no view): newest first, and only rows a person wrote (`actor_id` set) about something other than the platform's own objects: the metadata store, the data-migration ledger, and every identity object `@objectstack/platform-objects/identity` declares (users, members, organizations, sessions, keys, SCIM): every sign-in stamps the last-login columns on `sys_user` under the signing-in person's own name, the signing key in `sys_jwks` is minted under the first sign-in's session, and adding a person writes `sys_user` and `sys_member` rows that person can read. Sign-in stamps, migrations, seeds and metadata history no longer sit between the business rows; an administrator's edits to users are in `all`. `all` lists every row the reader may read, platform rows included, newest first. Nothing is removed from storage and nothing changes in what is written; every excluded row still has its `sys_audit_log` entry.
+  - **Label and description.** The object reads `Activity Feed` (zh-CN `动态`) instead of `Activity`, which collided with an app's own activity object (a CRM's calls and meetings), and its description says what the page is instead of `Recent activity stream entries (lightweight, denormalized)`.
+- 740edc5: fix(plugin-audit,platform-objects): the audit log's default list shows what people did, not the rows the platform writes beside it; the audit objects read in Chinese
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  Setup's 审计日志 opens the first `sys_audit_log` list view, `recent`. One sign-in used to put two rows there (the `login` row and an `update` of the person's `sys_user` stamping `last_login_at` / `last_login_ip`), the first sign-in through the console a third (the token-signing key in `sys_jwks`), and one settings change three or four (the `config_change` row, the stored setting, a secret's ciphertext, and the settings trail's own entry).
+  
+  - The ledger writer now marks the sign-in stamp row with `metadata: {"event":"auth.last_login_stamp"}`, the way `config_change` rows carry `settings.set`. Only an update of `sys_user` whose changes are the stamp's fields alone is marked; an administrator's edit of a user is not. The row is still written.
+  - `recent` leaves out the marked row, the rows on `sys_secret`, `sys_setting_audit`, `sys_platform_setting_audit`, `sys_jwks`, `sys_migration` and `sys_migration_journal`, and the rows on `sys_setting` / `sys_platform_setting` other than `config_change`. Nothing is removed from storage, and `all_events` (全部) still lists every row.
+  - `sys_platform_setting` and `sys_platform_setting_audit` were in no translation bundle, so they read English in every locale; they now ship in `@objectstack/platform-objects`' bundles with zh-CN translations (ja-JP and es-ES carry the English fill). `sys_comment_reaction`'s zh-CN bundle is translated.
+- 05a30e6: feat(service-settings,plugin-audit,plugin-sharing): a config_change ledger row names the settings row it changed, an audit row's record page lists the other changes to the same record, and a queue's record page lists its members
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - **`@objectstack/service-settings`: the `config_change` row's shape changes (not breaking).** A settings write's `config_change` row in `sys_audit_log` now sets `record_id` to the id of the stored settings row the write changed (`sys_setting`, or `sys_platform_setting` for a global value), beside the `object_name` it already named; before, `record_id` was always null. `metadata` and the digest in `new_value` are unchanged, and an in-memory settings store still writes null. Rows written before this release keep their null `record_id`.
+  - **Who can read those rows narrows.** Because a `config_change` row now names a record, the ledger's parent-record read gate judges it by that settings row: a reader holding only the ledger's own read grant, who cannot read the settings store, no longer sees new `config_change` rows. Holders of the ledger's audit capability (`view_all_audit_log`, administrators by default) still see every row. Older rows with a null `record_id` are still served under the ledger grant. Nothing becomes visible to a reader who could not see it before.
+  - **`@objectstack/plugin-audit`: `sys_audit_log` gets a default record page** (`sys_audit_log_detail`) that shows the row's fields and lists every other ledger row with the same `record_id`, newest first. Beside a `config_change` row that list holds the CRUD mirror's create and update rows for the same settings row, which carry a non-secret value in plain text; a secret's mirror row carries neither the value nor its handle. The list has no "New". The page label ships in all eleven locales.
+  - **`@objectstack/plugin-sharing`: `sys_queue` gets a default record page** (`sys_queue_detail`) whose members list reads `sys_queue_member` where `queue` equals this queue's `name`, and whose "New" opens the member form with `queue` filled in with that name. `sys_queue_member.queue` is unchanged. Declared queues have no `sys_queue` row, so they have no page. The page label ships in the plugin's four locales.
+- fd749a4: feat(audit): a write made while an administrator impersonates a user now records the administrator
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  
+  An administrator who impersonates a user writes as that user, and until now nothing on the write said otherwise: the `sys_audit_log` row, the `sys_activity` row and the record were byte-identical to the user's own work. The session already knew (`sys_session.impersonated_by`); the write did not.
+  
+  - `ExecutionContext.impersonatedBy` (new, optional, attribution only) carries the administrator's `sys_user` id. The shared request-identity resolution sets it from the session read that admitted the caller, for a session credential only. `HookContext.provenance.impersonatedBy` hands it to hooks; it is never folded into `session`, so a hook that gates on the caller still sees the impersonated user.
+  - `userId`, `created_by`, ownership, `current_user.*` RLS and every permission stay the impersonated user's. Nothing in the authorization path reads the new field.
+  - The audit writer stamps `sys_audit_log.metadata.impersonated_by` on record writes and on `action_invocation` rows, and `impersonated_by` plus `impersonated_by_name` in the `sys_activity` row's metadata. Each key is present only on such a write; its absence means the user acted themselves. `user_id` and `actor` do not move.
+  - A flow started from such a session carries the administrator onto its own writes (`AutomationContext.impersonatedBy`), on both `runAs` arms: a record-triggered flow, a manual `POST /:name/trigger` and a `type: 'flow'` action alike. After an approval decision the decider's segment carries none.
+  - The console's record timeline and field history read 「Dev Admin 代王工操作」 (`detail.impersonatedActor`, in all ten console languages).
+  
+  No schema column and no migration: older rows simply carry no key.
+- c5101a0: i18n(plugin-audit): the audit, activity and comment objects and the activity-feed sentences ship in all eleven platform languages
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  `sys_audit_log`, `sys_activity`, `sys_comment` and `sys_comment_reaction` now carry Traditional Chinese (`zh-Hant`), Arabic (`ar`), French (`fr`), Brazilian Portuguese (`pt-BR`), Russian (`ru`), German (`de`) and Korean (`ko`) beside the existing `en`, `zh-CN`, `ja-JP` and `es-ES`, and so do the activity-feed summaries ("Created … ", "Updated …: fields", "… mentioned you"). A reader in one of those languages sees the audit trail, the activity feed and the mention notice in their own language instead of English. Each new locale is registered under its platform-table tag with its source-hash companion and its messages, and the package's extract command lists the seven tags, so the existing `check:i18n` bundle check covers them. Part of #30512.
+- 616311c: fix(service-settings): a settings `config_change` audit row records the value before and after the change, with secrets kept as digests
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  A settings write's `config_change` row on `sys_audit_log` recorded who changed which key and when, plus a digest of the new value. It had no `old_value`, and its `new_value` held no readable value, so the row could not show what a policy setting (for example `auth.allowed_ip_ranges`) was changed from or to. ADR-0007 (Audit & history) asks for both, with an encrypted value recorded only as a placeholder and a checksum.
+  
+  - **`@objectstack/service-settings`.** `new_value` is `{ namespace, key, scope, value, digest }`. `old_value` has the same shape for the value the same stored settings row held before the write. It is `null` when that row held no value: a first write at that scope, or a row an earlier reset cleared. A reset now records its before value in `old_value`, and its `new_value` stays `null`. A secret-valued key, which is one the manifest declares `encrypted: true` (`type: 'password'` forces it), carries no `value` on either side. Each side carries only its masked digest, `<encrypted:hmac-sha256:…>`, or `<encrypted>` when no keyed digest is available. That is the same `new_value` such rows had before, so readers that parse it keep working. A row stored encrypted is never shown either, even if the key is no longer declared secret. `metadata` is unchanged and carries no value. `SettingsAuditSink.record` gets two optional entry fields, `value` and `previous`, and a host sink that ignores them works as before.
+  - **`@objectstack/plugin-audit`.** The ledger's read-side field redaction now also applies to a `config_change` row about a settings store (`sys_setting`, or `sys_platform_setting` for a global value). If a reader's field-level security masks that store's `value` field, the reader gets neither the value nor its digest on either side. They still see which setting changed. The CRUD mirror's row about the same write is narrowed the same way. Readers who can see the field get the row exactly as stored.
+- ea62933: feat(plugin-auth, plugin-audit): a sign-in the IP allow-list refuses leaves one `login_failed` row in the audit log, bounded per client address
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  A sign-in refused by the ADR-0069 D5 IP allow-list used to leave nothing in `sys_audit_log`: the deployment's list answered `403 IP_NOT_ALLOWED` with only a once-per-process operator line, and an organization's own list refused the session silently. Both now write a `login_failed` row with `metadata.reason: "IP_NOT_ALLOWED"`, `metadata.rule: "ip_allow_list"`, `metadata.endpoint` and `metadata.attempts`, and the client address and user agent in `ip_address` / `user_agent`:
+  
+  - **The deployment's list** refuses before any account is resolved. Its row names the account when the request's `email` resolves to one (the password sign-in's own account lookup), and is written with no account otherwise. Only `/sign-in/*` endpoints are recorded; a refused session read or sign-out is not a sign-in. The row is written off the response path, so the refusal's status, body and timing do not depend on whether the address names an account.
+  - **An organization's own list** refuses when the session is created. Its row names the account and the organization (`tenant_id`). A refused switch of the active organization is not a sign-in and writes no row.
+  
+  The rows are bounded so a scanner cannot flood the table: per client address, in a 10-minute window from its first refusal, only the 1st, 10th and 100th refusal write a row (`attempts` 1, 10, 100); across all addresses, at most 1000 rows per 10-minute window, with one operator `warn` line in a window once the cap drops a row. The bound is held in each server process, so N replicas write up to N times as many rows. No row carries the submitted identifier or the password.
+  
+  `@objectstack/plugin-audit`'s `AuthSessionAuditEvent.userId` and `@objectstack/plugin-auth`'s `AuthEventAuditSurface` event `userId` are now optional: a `login_failed` with no `userId` is written with `user_id` and `record_id` null (a row about no record, read under the ledger's own grant, platform administrators only when it names no organization). Any other event without a `userId` still writes nothing. `AuthManager.resolveRefusedSignInAccountId(email)` is new: the account a refused sign-in names, used only for that row. A sink registered on the `audit` service slot now receives `login_failed` events with no `userId`, so a custom sink must accept one. The exported `signInFailureEventFor` now answers `null` for `reason: 'IP_NOT_ALLOWED'`, because the door that refused the sign-in writes that row itself.
+- 022b4e7: feat(audit): every data export writes one run-level `sys_audit_log` row, and the `export` action comes back with its writer
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  `GET /data/:object/export` used to leave the compliance ledger nothing to say: a user could download up to 50,000 rows of any object they may export, `sys_audit_log` included, and no row recorded who, what or how much. Each export the door streams now writes one row with `action: "export"`, the object, `record_id: null` and the exporter (user, actor, tenant, and the agent or impersonator when there is one). Its `metadata` carries the format, the row count, the effective and requested limit and whether the 50,000 cap clipped it, whether the file was truncated at the limit, a bounded summary of the filter (field names and operators, at most 32 terms, never a comparand), whether a search term narrowed it (never the term) and the outcome. An export whose read fails after the checks records `outcome: "failed"` with the status and machine code it answered.
+  
+  A request refused before anything is read (no export permission, a bad parameter, an unparseable filter) writes no row; neither does the import template. The row is written after the file is finished, so the audit write never changes or delays the download; a ledger write that fails is logged at `error` once per cause and the export is unaffected.
+  
+  `export` is declared again on `sys_audit_log.action` (it was retired under #8147 because nothing wrote it) and is shown by the `config_changes` list view beside `config_change` and `import`. The writer lives on the `audit` service slot as `recordDataExport`, beside `recordAuthEvent` and `recordActionInvocation`; a kernel without the audit plugin exports exactly as before.
+- d463b99: fix(plugin-auth,plugin-audit): a SCIM-driven write names the SCIM connection that performed it, on its audit row
+  
+  Clause-②: yes (widening) — `authSystemWriteContext()`, published through `export * from './auth-actor-attribution.js'`, now declares an optional `actor` member on the context it returns; nothing it returned before is removed or narrowed.
+  Metadata-protocol: none
+  
+  An identity provider's SCIM writes (the `sys_user` create, the deactivation's ban update, the delete, and the `sys_scim_*` rows written beside them) used to leave `sys_audit_log` rows with `actor`, `user_id` and `metadata` all null, so no row said which SCIM connection (which IdP) acted, and "who deactivated this account" had no answer.
+  
+  - **`@objectstack/plugin-auth`.** The SCIM request scope `handleRequest` opens around every `/scim/v2/*` request now carries the connection the bearer verified as: the bearer verifier records it, and `authSystemWriteContext()` gives every write of that request `actor: 'svc:scim:CONNECTION_ID'` on `ExecutionContext.actor`, with no `attributedUserId`. The connection id is the label's identifier because it is immutable and keys every resource the connection provisions. Writes outside a SCIM request are unchanged.
+  - **`@objectstack/plugin-audit`.** The audit writer records that label on `sys_audit_log.actor`, as it records any service principal, and the connection id alone as `metadata.scim_connection_id`, read off the same label so the two never disagree. `user_id` stays null, because no human acted. Rows of every other actor are unchanged.
+  - **Never on a row:** the bearer, its digest and the credential row stay out of the write context, so none of them can reach `actor`, `metadata` or any other column.
+- 58f66b9: feat(cloud-connection,plugin-audit): the hosted install door forwards the install mode and the installing user, an unmanaged grant is copied by the environment's own install-local door, and every unmanaged copy writes a `package_unmanaged_import` audit row
+  
+  Clause-②: yes (widening) — `POST /api/v1/cloud-connection/install` accepts `install_mode` (or `installMode`) and sends the control plane's `sys_package.install_package` action `install_mode` and `installer_user_id`; on an unmanaged grant it answers the install-local door's answer; the install-local plugin registers the in-process `marketplace-install-local` service; `sys_audit_log.action` gains `package_unmanaged_import`, and plugin-audit's package lifecycle writer accepts that event; `@objectstack/plugin-audit` newly exports `PACKAGE_UNMANAGED_IMPORT_AUDIT_ACTION`, `PackageUninstallAuditEvent` and `PackageUnmanagedImportAuditEvent`, `PackageLifecycleAuditEvent` is now the union of the two event types (narrow it on `action`), and `PackageLifecycleAuditAction` gains `package_unmanaged_import`
+  Metadata-protocol: none
+  
+  - **The install mode, forwarded.** `POST /api/v1/cloud-connection/install` reads `install_mode` (the control plane's spelling) or `installMode` (the install-local door's), parsed against `InstallModeSchema`. A value the schema refuses, or two spellings that disagree, answers 400 `INVALID_REQUEST` before the control plane is called. When the caller names a mode, it is sent as the action's `install_mode` body param; when the caller names none, nothing is sent, and the control plane reads that as `managed`, as before.
+  - **The installing user, forwarded.** Every install now sends `installer_user_id`, a body param on the same action, never a header. Its value is the id of the session this door admitted, never a value from the request body. The control plane reads it only for a member of the environment's organization, and records its service principal otherwise (the cloud half, cloud#3624).
+  - **An unmanaged grant is copied by the environment.** When the control plane grants an unmanaged install, this door hands the copy to the environment's own install-local door: `installMode: 'unmanaged'`, the granted `version_id`, `seedSampleData` only when the caller asked for it, and the caller's own headers, so the door admits and gates the same person. The answer is that door's answer. The copy keeps every gate the install-local door applies: the installer's install capability, the protocol handshake, the namespace holds, the copy record, and sample rows owned by the installer. A grant this door cannot read (no `install_mode: 'unmanaged'` echoed, or no `version_id`) answers 502 and copies nothing; a `data.manifest` in the answer is never read. When the answer has no `install_mode` at all, the 502 adds that a control plane that does not read the param may already have installed the package managed, and to check Installed before retrying. An environment without the install-local plugin answers 503 and copies nothing. A control-plane refusal, and every managed install, is answered exactly as before.
+  - **Cross-repo, not measured here.** The grant's shape (the control plane skips its own install on an unmanaged grant and answers `data.install_mode: 'unmanaged'` with `data.version_id`) is assumed from the cloud half's design; cloud PR #3683 is not readable from this repository. So is the install-local plugin being mounted in a hosted environment's kernel at all: this repo's hosted Console reads a cloud base as having no install-local door (the 30963 changeset), and without the door an unmanaged grant answers 503 (#31482). The namespace a copy is renamed into (`targetNamespace`, #30794) is not forwarded to the control plane yet (#31482): whether its action accepts an unknown param is not known here.
+  - **The in-process install door.** The install-local plugin registers the `marketplace-install-local` service at `init`. Its `install(request)` runs `POST /api/v1/marketplace/install-local` for a Fetch `Request` and answers that route's `Response`, through the same handler.
+  - **New plugin-audit exports.** `@objectstack/plugin-audit` exports `PACKAGE_UNMANAGED_IMPORT_AUDIT_ACTION`, `PackageUninstallAuditEvent` and `PackageUnmanagedImportAuditEvent`. `PackageLifecycleAuditEvent` is now `PackageUninstallAuditEvent | PackageUnmanagedImportAuditEvent`, so a reader narrows it on `action`; `PackageLifecycleAuditAction` gains `package_unmanaged_import`.
+  - **The environment's audit row of each unmanaged copy.** The install-local door's unmanaged branch hands the `audit` slot one `package_unmanaged_import` event per copy it attempted, whether it landed or not, from both doors that reach it. plugin-audit's package lifecycle writer stores it as a deployment-level `sys_audit_log` row (no record, no organization), with `metadata` naming the source package and version, the new base, its namespace, the namespace a rename came from, the items copied and `outcome` (`success` or `failure`; a failure adds its error code and HTTP status, never its message). `environment_id` is null on this row: the door does not know it. The ledger's `action` select gains the value writer-first, with its labels regenerated by `os i18n extract`; the new label is filled from English in every locale until a translator replaces it. An audit slot that throws changes no answer.
+- 79a0d30: fix(plugin-audit): a comment write leaves a ledger row and an activity row, stamped when the author was impersonated
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  `sys_comment` is no longer on the audit writer's skip list. Creating, editing and deleting a comment now writes one `sys_audit_log` row and one `sys_activity` row, exactly like a write to any other object, and a comment written from an impersonation session carries the administrator in `metadata.impersonated_by` (and `impersonated_by_name` on the activity row). Before, such a comment could not be told from one the user wrote.
+  
+  The rows name the comment as their parent (`object_name: 'sys_comment'`, `record_id`: the comment's id), so a record's own activity timeline does not show the comment twice; they appear in the object-agnostic feeds (the recent-activity feed, the Audit Logs list). A reader is served them only when it can read the comment, which means reading the record the comment is on: the activity and ledger read gates now enumerate `sys_comment` as a parent and ask the comment's own read gate. A holder of the ledger's audit capability keeps reading every ledger row of the organization, as before. Comments written before this change have no rows; nothing is backfilled.
+- 8ef2523: feat(audit): a package uninstall writes one `package_uninstall` row about the package itself
+  
+  Clause-②: yes
+  Metadata-protocol: none
+  
+  Uninstalling a package left a `sys_audit_log` row for each metadata item it removed, and nothing about the package: its `sys_packages` row is deleted with raw SQL, so no hook ever saw it. A package that shipped no stored metadata left no trace at all. The uninstall verb (`deletePackage`, the path `DELETE /api/v1/packages/:id`, the import rollback, the paired-customization undo and any in-process caller take) now writes one row per package it uninstalled, after the package's stored row is gone: `action: "package_uninstall"`, the actor the verb was called for (`user_id` and `actor`; a `svc:` principal is the `actor` only), no record and no organization (an uninstall is environment-wide, so the row is deployment-level and served to the platform administrator alone), and in `metadata` the package id, its installed version, the environment, whether the object tables were kept, the items removed and left behind, and `outcome` (`complete` or `partial`).
+  
+  An uninstall the verb refuses writes no row, and neither does an id that is not installed. The writer lives on the `audit` service slot as `recordPackageLifecycleEvent`, beside `recordAuthEvent`; a kernel without the audit plugin uninstalls exactly as before, and a ledger write that fails is logged at `error` once per cause without changing the uninstall's answer.
+- bfe5282: fix(cloud-connection)!: a hosted unmanaged install copies into the namespace the control plane's grant names, and `target_namespace` beside a managed install is refused
+  
+  Clause-②: yes (narrowing) — `POST /api/v1/cloud-connection/install` gains an optional `target_namespace` (or `targetNamespace`) beside an unmanaged install, forwarded to the control plane and, as the grant echoes it, to the install-local door's copy; the same key beside a managed install (or no `install_mode`), which the route ignored until now, is refused 400, as are the two spellings naming different values.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any authorable schema is added, removed, renamed or re-shaped and no stored row is rewritten. What moves is the answer an HTTP request gets: an install request that names target_namespace beside a managed install is refused where it was ignored, and nothing at rest holds that request, so there is nothing for a migration to rewrite. -->
+  
+  **BREAKING.** `POST /api/v1/cloud-connection/install` used to ignore a `target_namespace` or `targetNamespace` key. Beside a managed install, or with no `install_mode`, either spelling is now refused `400 INVALID_REQUEST` with the install-local door's own sentence, before the control plane is asked: a managed install is never renamed, so a request that names a namespace for one is asking for something that cannot happen. A body that names both spellings with different values is refused `400 INVALID_REQUEST` naming both. No first-party caller sends either key today: the Console's marketplace, the CLI and `@objectstack/client` hold none. To fix a request that is refused, drop the key, or send `install_mode: 'unmanaged'` to take a copy under that namespace.
+  
+  What the key does beside an unmanaged install:
+  
+  - It is read in either spelling, `target_namespace` (the control plane's) or `targetNamespace` (the install-local door's), as the route reads `install_mode` / `installMode`. It is trimmed, then parsed by the manifest's own `namespace` declaration, and a value it refuses is `400 INVALID_REQUEST` with `details.targetNamespace`, before the control plane is asked. Otherwise it is sent to the control plane's install request as `params.target_namespace`.
+  - The copy takes the namespace the grant names in `data.target_namespace`, handed to the install-local door as `targetNamespace`. The grant governs it: a namespace in the caller's body never reaches the door on its own. A grant that names a namespace when none was asked passes it through too.
+  - A request that asked for a namespace the grant does not echo (none, or a different one) copies nothing and answers `502 PLUGIN_INSTALL_FAILED`, audited in the environment like the other grants this door cannot read. Copying into the source's namespace instead would not be what was asked. The audit row (`@objectstack/plugin-audit`'s `package_unmanaged_import`) records both namespaces in its metadata, as `requested_namespace` and `granted_namespace` (null when the grant named none); no other row carries the two keys.
+  - With no ask and no echo, nothing changes: the copy keeps the source's namespace.
+  - What the door says about the name itself keeps its own answer on this path: a namespace another package owns is `409 RESOURCE_CONFLICT` with `details { namespace, owners }`, and a reserved name, or one the copied names cannot take, is `400 INVALID_REQUEST` with `details.targetNamespace`.
+  
+  Cross-repo, not measured here: the control plane's spelling (`params.target_namespace` in, `data.target_namespace` echoed) is cloud PR #4206's. Until the control plane echoes it, an unmanaged install that names a namespace answers the `502` above, and nothing is copied.
+- 5a8dbc7: feat(security)!: an AI service account is the agent principal of its own requests, under the agent ceiling (ADR-0151 D3)
+  
+  Clause-②: no (narrowing) — every agent principal's permission sets are now read under the agent ceiling (no View All, no Modify All, no transfer, restore or purge, no system permission, no admin scope). The OAuth-connected assistant's first-party sets carry none of these bits, so only a deployment that edited its own agent set to carry one sees a narrower answer. No door, request or response shape, error code or status changes.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of a package root is removed or retyped. The narrowing reads only agent principals' permission sets at evaluation and refuses one class of assignment write; there is no stored shape for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** for an agent principal whose permission sets carry View All, Modify All, a destructive grant (transfer, restore, purge), a system permission or an admin scope. Measured first-party: 0 (none of the 3 OAuth agent ceiling sets carries any of these bits, and no AI service account row can exist until registration lands).
+  
+  - **Before.** An agent principal's sets were applied as written.
+  - **Now.** Those bits are cleared when the sets are read, and assigning such a set (or a position binding one) to an AI service account is refused by name.
+  - **The remedy.** Grant the agent the CRUD bits it needs on the objects it reads; a bypass bit or an administrative grant is a person's to hold.
+  
+  An AI service account (a `sys_user` row whose `principal_kind` is `agent`) now acts as itself. Its API key, on REST, on `/mcp` and over stdio, admits a context whose `userId` is the account, with `principalKind: 'agent'` and no `onBehalfOf`. Its own grants are its whole authority:
+  
+  - It does not receive the `everyone` anchor's permission sets or the member baseline. Its floor is the restricted agent set, so a new account can do nothing until it is granted something.
+  - It carries no system permission and is never a platform or organization administrator, whatever it holds: it never carries `admin_full_access` or an organization administrator set at all, so no reader that judges standing by a set's name (the approvals override and the `admin_rescue` slate among them) counts it.
+  - Every agent principal's permission sets are read under the agent ceiling: no View All, no Modify All, no transfer, restore or purge, no system permission and no admin scope. A set edited after it was assigned still grants nothing above the ceiling. The permission sets an OAuth-connected assistant receives carry none of these bits, so it is unchanged.
+  - Assigning an account a permission set, or a position whose sets, carry any of those bits is refused `400 VALIDATION_FAILED` (`invalid_value`), naming the set and what in it is above the ceiling.
+  
+  Flow runs, attachment and comment access checks, mention checks and the access explainer read the account as the agent it is. A person's sign-in, keys and grants are unchanged.
+  
+  Nothing registers an AI service account yet; the registration, key and lifecycle doors follow in a later change.
+- 9253be4: feat(plugin-audit): an API key or OAuth access token admitting a request leaves a `credential_use` row in `sys_audit_log`, once per credential per use window
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  Credential use left no ledger row naming the credential: the only trace was the credential's own last-use stamp. An audit export or SIEM stream had nothing to read for "which key or token acted as whom, and when".
+  
+  - **`sys_audit_log.action` gains `credential_use`** (`@objectstack/plugin-audit`). One row per credential per use window, written when the credential's own throttled use stamp lands: `sys_api_key.last_used_at` (the shared key-admission seam, at most once per key per hour, so every door that admits a key counts: REST, the runtime dispatcher and its `/mcp` face, the stdio MCP transport, the storage doors) and `sys_oauth_consent.last_used_at` (an OAuth access token's use on the `/mcp` door, at most once per consent per clock hour). No new timer: a second use inside the window writes no row.
+  - **The row** names the credential's owner (`user_id`, `actor`), the credential row (`object_name` / `record_id`), the organization it is bound to (`tenant_id`, or none), and in `metadata` the `credential_kind` (`api_key` / `oauth_access_token`), the `credential_id`, the window start (`used_at`) and, for a token, the `client_id`. It never carries a key, a token, a key hash or a key prefix.
+  - **A `skip_consent` OAuth client** (`@objectstack/plugin-auth`) has no consent row to stamp. Its use is handed to the new `audit` slot member `recordCredentialUse` from the same stamp point and under the same throttle (at most once per client, user and organization per clock hour in each process); the row names the client's `sys_oauth_application` row.
+  - **Where the use came from:** the source address and the user agent (`ip_address` / `user_agent`) are recorded by the change that follows this one in the same release; see its entry.
+  
+  Nothing about which credentials are admitted changes. To read the rows: filter `sys_audit_log` on `action = 'credential_use'`.
+- 26d30d7: feat(plugin-audit): the `credential_use` row records where the use came from, the client address and the user agent
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  A `credential_use` row in `sys_audit_log` named which API key or OAuth access token acted as whom, but not from where: `ip_address` and `user_agent` were null, because neither credential's use stamp held the request's client facts. A leaked key used from a new address looked the same as normal use.
+  
+  - **`ip_address`** is the address the deployment establishes for the request under its one client-address trust rule: `X-Forwarded-For` / `X-Real-IP` only when `server.trustProxy` is declared, otherwise the transport's own peer address. No forwarded header is ever recorded as the address without `trustProxy`. **`user_agent`** is the request's `User-Agent`, as presented.
+  - **Why an address is missing** is written on the row as `metadata.ip_address_absent`: `stdio` (the stdio MCP transport has no network peer), `undetermined` (the trust rule established no address), `not_supplied` (the door that admitted the credential handed over no client facts yet), or `unrecordable` (the established value does not fit the address column, so it is not stored). An address is never guessed.
+  - **The facts are the first use's in the window.** The row is still written once per credential per use window, when the credential's own throttled stamp lands, so `ip_address` and `user_agent` are those of the use that opened the window. A second use inside the window, from any address, writes no row.
+  - **Doors:** REST, the runtime dispatcher (its `/mcp` face included) and the stdio MCP transport hand their client facts over. An API key admitted at any other door records its user agent and `not_supplied` for the address.
+  - **Contract (`@objectstack/spec`, widening):** `IAuthService` gains the optional `resolveClientAddress(transport)` (the address the deployment establishes for a request; `AuthManager` already implements it), and `recordMcpAccessTokenUse(principal, transport?)` takes the admitted request's headers and peer address as an optional second argument. The new `AuthRequestTransport` type names that argument.
+  - **`@objectstack/core`:** `resolveApiKeyAdmission` takes an optional trailing `client` argument, `resolveAuthzContext` an optional `client` input and `resolveRequestExecutionContext` an optional `transport` input. None is read for any admission verdict: which credentials are admitted does not change.
+  
+  The address and user agent are stored under the audit log's existing retention and access rules, and the row still never carries a key, a token, a key hash or a key prefix.
+- 489f0ce: feat(plugin-audit): `scim_refused` rows in `sys_audit_log`, one per refused SCIM request
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  `sys_audit_log.action` gains `scim_refused` (label "SCIM Refused"), added with its writer: `createScimRefusalAuditWriter`, registered on the `audit` service slot as `recordScimRefusal` beside `recordAuthEvent`. plugin-auth's SCIM door calls it for each `/scim/v2/*` request it answered 400 or above, after its per-connection bound.
+  
+  The row names the connection the way an accepted SCIM write's row does: `actor` is `svc:scim:CONNECTION_ID` and `metadata.scim_connection_id` the id, or `actor` null and `scim_connection_id: 'unknown'` (plus `metadata.presented_credential`) when the bearer verified as no connection. `metadata` also carries `resource`, `method`, `status`, `scim_type` or `error_code`, and `suppressed` when refusals of that connection were dropped since its last row; `ip_address` carries the client address. `tenant_id` is the organization the connection's credential belongs to, so an organization's administrators read their own connection's refusals; it is null (a deployment-level row) when the bearer verified as no connection or the credential names no organization. `user_id`, `object_name` and `record_id` are null: no human acted and the request was refused. The request body, the bearer, its digest, attribute values and the error's `detail` text are never written, and every field is re-checked against a bounded token shape before it reaches the row. A failed write is reported at `error` once per cause and never reaches the SCIM answer.
+  
+  The rows are listed by the unfiltered `recent` and `all_events` views and can be selected with `action = 'scim_refused'`; the `auth_events` view, which lists sign-ins by user, does not list them.
+  
+  New exports: `createScimRefusalAuditWriter`, `buildScimRefusalAuditRow`, `SCIM_REFUSED_AUDIT_ACTION`, `UNKNOWN_SCIM_CONNECTION`, and the types `ScimRefusalAuditEvent`, `ScimRefusalAuditWriter`, `ScimRefusalAuditWriterOptions`, `ScimPresentedCredential`.
+- 93ff5dd: feat(spec,plugin-audit,cli): the pure core of audit ledger tamper evidence, and the `audit-seal` secret family
+  
+  Clause-②: yes (widening) (new exported contracts, a new crypto scope member and three platform objects; nothing main accepts is refused)
+  Metadata-protocol: none (platform objects and contracts; no authorable key in this slice)
+  
+  The first slice of ADR-0154. Nothing seals yet: no object opts in, and the three new objects are not registered on any runtime in this release.
+  
+  - **`@objectstack/spec`.** `CRYPTO_CONTEXT_SCOPES` gains `audit_seal`, the scope the audit sealer seals checkpoint seeds and its signing key's private half under. Under `audit_seal`, `ICryptoProvider.rotateKey` must return the handle's own id, because signed checkpoint bodies name their seed by that id. New contracts `IAuditCheckpointSigner` and `IAuditCheckpointSink` (`AUDIT_CHECKPOINT_SIGNER_SERVICE`, `AUDIT_CHECKPOINT_SINK_SERVICE`), the seams a host replaces to keep the signing key in its own KMS or to deliver checkpoints outside the database. `PLATFORM_PROVIDED_OBJECT_NAMES` gains the three objects below.
+  - **`@objectstack/plugin-audit`.** The pure core the sealer and the verifier share: RFC 8785 canonical JSON, the canonical form of a sealed row (one spelling per instant, salted commitments of value columns), seed salts, the RFC 6962 Merkle tree, and the signed bodies of checkpoints and amendments. The objects `sys_audit_checkpoint`, `sys_audit_amendment` and `sys_audit_signing_key` are defined, not yet registered (no runtime has their tables in this release), and the audit writer never records writes to them.
+  - **`@objectstack/cli`.** The `sys_secret` reference union reads a fourth family, `audit-seal`, so `os secret rewrap` re-wraps the sealer's secrets and `os secret orphans` never reads them as unreferenced. Where the holder objects are not registered, the family is complete and empty when no `sys_secret` row carries an audit-seal coordinate, and a gap otherwise. The rewrap report counts `audit_seal` alongside the other scopes, and the `os migrate organization-ownership` inventory lists the three new objects as deployment-level (no organization column to drop).
+- f71bb41: feat(plugin-audit): register the audit checkpoint and signing-key objects ahead of the sealer
+  
+  Clause-②: yes (widening) (two platform objects become registered; nothing main accepts is refused)
+  Metadata-protocol: none (platform objects registered; no authorable key, value or metadata type moves)
+  
+  The second slice of ADR-0154, in two parts. Nothing seals yet: no object declares `lifecycle.seal`, and the sealer and signer that write these objects land in the next part.
+  
+  - **`@objectstack/plugin-audit`.** The plugin now registers `sys_audit_checkpoint` and `sys_audit_signing_key`. Their tables are provisioned at `kernel:ready` like the plugin's other objects. Both are private by default, written only by the platform, and empty in this release. Their labels and help text are in every locale bundle the plugin ships. `sys_audit_amendment` stays declared and unregistered until its first writer, the redaction amendments, lands.
+- 9a901a3: fix(plugin-audit): `sys_audit_log` no longer describes itself as an "immutable" audit trail
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  The object's description and doc comment said "Immutable audit trail for platform events". The guarantee the platform actually gives is narrower: rows are written only by the platform and are read-only through the data API and in Setup. Platform code running in a system context (retention archive-then-delete, redaction migrations) can still change or delete rows. The description now says what holds, in English and in the ten translated locales, and the package README says the same. Nothing about the object's fields, permissions or API behaviour changes.
+- aad7d2f: fix(security): carry each permission set's package from the grant to the per-request evaluation
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  When two installed packages each ship a permission set of the same name, a request now gets the set its grant names and no other. The authorization resolver records the `(package, name)` each granted set resolved to on `ExecutionContext.permissionSetAddresses`, and the security plugin's evaluator reads every set through the security catalog at that address. It used to take the first set of the name the metadata list returned. A name that arrives with no address (an API key's seeded sets, an agent's scope ceiling, the baseline) resolves by ADR-0150 D3 with no caller: one holder answers as before, two or more are refused, naming every candidate once in the log, and nothing is granted.
+  
+  The activation ledger now switches a set off per holder, through its row's `package_id`: switching off one package's `sales_rep` leaves another package's `sales_rep` granting. A set the `everyone` anchor carries because a deployment accepted a package's suggestion resolves at the package the suggestion row names. The access explainer reports the same holders enforcement reads. Every context built by hand from the resolver's grants (objectql's scoped context, a `runAs: 'user'` flow run, storage, the audit mention gate and the organization-administrator check) carries the addresses with the names.
+  
+  A deployment where every set name has one holder sees no change.
+  
+  Two server-side exports gain a field and an option, and keep what they had. `readDisabledCatalogNames(...)` (`@objectstack/core`) adds `permissionSets`, its switched-off holders, asked with `permissionSetSwitchedOff(disabled, packageId, name)`; its `permissions` name set is unchanged. `PermissionEvaluator.resolvePermissionSets` adds `options.catalogLoader`, which takes `{ name, packageId? }` requests; called without it, the method reads the metadata list, the bootstrap sets and the by-name loader as before. Resolved sets come back in the order they did before.
+- Updated dependencies [31fe289]
+- Updated dependencies [7d0b47c]
+- Updated dependencies [f6a429b]
+- Updated dependencies [eb96480]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [de24d17]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [486b0a9]
+- Updated dependencies [9ed2ee1]
+- Updated dependencies [769adff]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [3b8c724]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [5f47410]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [314ad95]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [771b2db]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [cd5f554]
+- Updated dependencies [f19fbb8]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [13aa6a3]
+- Updated dependencies [391d748]
+- Updated dependencies [af3451b]
+- Updated dependencies [ddcdc80]
+- Updated dependencies [000e773]
+- Updated dependencies [7fc401f]
+- Updated dependencies [4013e30]
+- Updated dependencies [3a27208]
+- Updated dependencies [343ddb2]
+- Updated dependencies [0c666c3]
+- Updated dependencies [f672e0d]
+- Updated dependencies [38717d3]
+- Updated dependencies [bfbdeec]
+- Updated dependencies [4adc890]
+- Updated dependencies [bcdf8d3]
+- Updated dependencies [ac890f5]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [8fed00f]
+- Updated dependencies [25fea77]
+- Updated dependencies [86ae2ca]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [977be38]
+- Updated dependencies [2046d21]
+- Updated dependencies [243eba1]
+- Updated dependencies [740edc5]
+- Updated dependencies [778aedf]
+- Updated dependencies [71318af]
+- Updated dependencies [fd749a4]
+- Updated dependencies [a26abbc]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [6a8f415]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [8cc709d]
+- Updated dependencies [60fe44f]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [f7afab8]
+- Updated dependencies [7b80724]
+- Updated dependencies [fb1ab89]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [e8e924f]
+- Updated dependencies [590724f]
+- Updated dependencies [35cd64c]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [d5f3bc5]
+- Updated dependencies [e3948ae]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [1c5cee6]
+- Updated dependencies [aad1603]
+- Updated dependencies [eb68b98]
+- Updated dependencies [1ebe0c5]
+- Updated dependencies [2f05a46]
+- Updated dependencies [b126c13]
+- Updated dependencies [a11ef71]
+- Updated dependencies [deac7f4]
+- Updated dependencies [2ae3e30]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [63de248]
+- Updated dependencies [a59d00a]
+- Updated dependencies [a2437b5]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [badf24d]
+- Updated dependencies [5268f50]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [e2bcd5c]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [9052337]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [7569fb5]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [4a3b186]
+- Updated dependencies [a2826a1]
+- Updated dependencies [2a6a28d]
+- Updated dependencies [902f162]
+- Updated dependencies [c77dd17]
+- Updated dependencies [555eb1b]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [8847e09]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [78eb352]
+- Updated dependencies [2ce2646]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [6bd00d2]
+- Updated dependencies [b5696b4]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [293a85b]
+- Updated dependencies [ed4b832]
+- Updated dependencies [8c9260f]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [f6199a8]
+- Updated dependencies [f5e23e2]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [cadd6aa]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [d36d4ad]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [e735425]
+- Updated dependencies [1f37085]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [6ee8c61]
+- Updated dependencies [f4b4c8a]
+- Updated dependencies [db50231]
+- Updated dependencies [0e1311d]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [b6e6545]
+- Updated dependencies [90457e7]
+- Updated dependencies [1f30be1]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [bafbc68]
+- Updated dependencies [0ebb080]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [59630d9]
+- Updated dependencies [fe88ecd]
+- Updated dependencies [5e85952]
+- Updated dependencies [ef4af73]
+- Updated dependencies [ae31539]
+- Updated dependencies [7e697ff]
+- Updated dependencies [96b9350]
+- Updated dependencies [d9a232f]
+- Updated dependencies [d655caf]
+- Updated dependencies [1cd0e01]
+- Updated dependencies [3487ccc]
+- Updated dependencies [cc16008]
+- Updated dependencies [cfe3563]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [5b7269f]
+- Updated dependencies [2735ca4]
+- Updated dependencies [6dd196d]
+- Updated dependencies [d834a36]
+- Updated dependencies [0cd594b]
+- Updated dependencies [c62e72a]
+- Updated dependencies [450bfb6]
+- Updated dependencies [9046e02]
+- Updated dependencies [f647430]
+- Updated dependencies [36a8700]
+- Updated dependencies [69db709]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [5a8dbc7]
+- Updated dependencies [fb94249]
+- Updated dependencies [98ba756]
+- Updated dependencies [e627eaa]
+- Updated dependencies [7231dc7]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [8fca8f7]
+- Updated dependencies [26d30d7]
+- Updated dependencies [a15b544]
+- Updated dependencies [3684d18]
+- Updated dependencies [d9f626b]
+- Updated dependencies [1a66fcf]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [f00fb1b]
+- Updated dependencies [c655af8]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [aad7d2f]
+- Updated dependencies [4f6fb53]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [45f0f81]
+- Updated dependencies [fa4cb68]
+- Updated dependencies [036a9fb]
+- Updated dependencies [fb71296]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [02498c9]
+- Updated dependencies [7aab601]
+- Updated dependencies [5c5f382]
+- Updated dependencies [e34723f]
+- Updated dependencies [9052363]
+- Updated dependencies [2b11a71]
+- Updated dependencies [de6d893]
+- Updated dependencies [c147fc2]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [5d4f2aa]
+- Updated dependencies [133f75a]
+- Updated dependencies [f4cd4ec]
+- Updated dependencies [b3d2f4b]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [7193160]
+- Updated dependencies [e1dac19]
+- Updated dependencies [3299873]
+- Updated dependencies [7b2bb66]
+- Updated dependencies [44a030b]
+- Updated dependencies [a794e32]
+- Updated dependencies [21510bb]
+- Updated dependencies [8304b08]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [5210acf]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [bdbaf80]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [cad764d]
+- Updated dependencies [63a470a]
+  - @objectstack/objectql@18.4.0
+  - @objectstack/spec@18.4.0
+  - @objectstack/platform-objects@18.4.0
+  - @objectstack/core@18.4.0
+  - @objectstack/metadata-core@18.4.0
+  - @objectstack/types@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes

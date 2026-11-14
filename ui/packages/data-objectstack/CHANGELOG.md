@@ -1,5 +1,332 @@
 # @object-ui/data-objectstack
 
+## 18.4.0
+
+### Patch Changes
+
+- 7a5f73e: refactor(fields, data-objectstack)!: `UploadProvider` moves into `@object-ui/fields`, the ObjectStack upload adapter into `@object-ui/data-objectstack`, and `@object-ui/providers` is retired
+  
+  Clause-②: yes (narrowing) — `@object-ui/fields` gains `UploadProvider`, `useUpload`, `UploadProviderProps` and the three upload contract types, and `@object-ui/data-objectstack` gains `createObjectStackUploadAdapter` and `ObjectStackUploadAdapterOptions`; the whole `@object-ui/providers` package is retired, which takes `createS3Adapter`, `createAzureBlobAdapter`, their option types and the exported `createObjectUrlAdapter` with it.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (runtime-export-retired @object-ui/providers#*) the retired operand is a published ui package whose entry held a React upload context, its hook, four upload adapter factories and their TypeScript option and result types; no packages/spec schema, registered node type, ADR-0087 conversion surface or stored shape names any of them, so there is nothing for `objectstack migrate meta` to rewrite, and a consumer meets the move at its own import, where the compiler names the missing module -->
+  
+  **BREAKING.** `@object-ui/providers` is retired: `18.3.0` is its last published version, and it gets no further release. Its one remaining job was the upload context the file, image and avatar widgets of `@object-ui/fields` upload through, so that context now lives in `@object-ui/fields` itself, and the adapter that talks to an ObjectStack server's storage service lives in `@object-ui/data-objectstack`, beside the other fetch logic against that server. The upload contract the two share is `@object-ui/types`'.
+  
+  What leaves, and what to do:
+  
+  - FROM `@object-ui/providers` TO `@object-ui/fields` and `@object-ui/data-objectstack`: import `UploadProvider`, `useUpload` and the `UploadProviderProps`, `UploadAdapter`, `UploadOptions` and `UploadResult` types from `@object-ui/fields` (the three contract types also from `@object-ui/types`), and `createObjectStackUploadAdapter` with `ObjectStackUploadAdapterOptions` from `@object-ui/data-objectstack`, then drop the `@object-ui/providers` dependency. `createS3Adapter`, `createAzureBlobAdapter`, `S3AdapterOptions` and `AzureBlobAdapterOptions` had no consumer and leave with no replacement: a host that uploads to its own bucket writes an object with a `name` and an `upload(file, options)` method against the `UploadAdapter` type of `@object-ui/types` and hands it to `UploadProvider`. `createObjectUrlAdapter` is no longer exported: it stays the local `blob:` adapter `useUpload` falls back to when no `UploadProvider` is mounted.
+  
+  What does not change: `UploadProvider`, `useUpload` and `createObjectStackUploadAdapter` keep their signatures and behaviour, the presigned upload request is the same, and the widgets read the same context.
+- 177f0ee: fix(app-shell,data-objectstack): Studio's and Setup's object editors edit the object as its author wrote it, not as the console is served it
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **`@object-ui/app-shell`:** the object editor in Studio's Data pillar and the one in Setup's metadata editor (`MetadataResourceEditPage` for `object`) now take their editable copy from the layered read's author-owned layers: the pending draft as stored (`draft`) when one is pending, otherwise `overlay ?? code`. Before, the copy was the `?state=draft` read (or `effective`), which arrives translated into the console's language and governed with the platform's injected columns (`owner_id`, `queue`, the audit and scope columns), so in a Chinese console one field edit saved the Chinese labels as the author's labels and sent the platform's columns back as the author's fields. What the editor shows of the served object stays as it was: the header's system-field count still counts the platform's columns, and the records grid still shows the served `owner_id` column. When a draft is pending but the layered read does not carry it, the editor installs nothing, shows the existing "draft unreadable" refusal, and sends nothing.
+  - **`@object-ui/data-objectstack`:** `MetadataClient.layered()` passes through the `draft` layer the server serves (`MetadataLayered.draft`, optional). It used to drop it.
+- 83fc096: Clause-②: no
+  Metadata-protocol: none
+  
+  A `ConnectionError` for a request nothing answered (an unreachable host, a rejected `fetch`) no longer reads as a server that answered with a 503 (#29916).
+  
+  - The `ConnectionError` constructor leaves `statusCode` undefined when the caller passes none. Before, it stamped `503`. `connect()` builds it that way when discovery's `fetch` rejects, every data method opens with `await this.connect()`, and the post-connect `error` connection state builds it the same way, so a read against a down backend was taken for the server's own answer. `answeredLoadFailure` now returns `null` for it and `classifyLoadError` reads `network`, so a failed-read state keeps its "check your connection" sentence.
+  - A discovery read the server answered with an error status (`!res.ok`) now carries that status (a 401 reads as `unauthorized`), instead of the invented 503.
+  - An answered 503 or 504 through `createErrorFromResponse` keeps its status, as before.
+- 6f095b9: feat(studio): customize a read-only package's dataset in the All metadata area, see what uses it before publishing, and read a refused publish at the dataset
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **Customize a dataset.** On a read-only base package, Studio's All metadata area opens a dataset in its form editor with the dataset designer and live preview, and offers Customize. The first saved edit copies the whole dataset into the base's paired `<base>.custom` package, declaring `overrides: { package, basedOn }`; the header's Publish applies it, and "Restore package original" on the override mark deletes the copy. On a writable package a dataset still opens the generic item page.
+  - **What uses it.** While a dataset is customized, the editor lists the dashboards, reports and other items that name it, read from the References read, so the person sees what a published change reaches. A failed read says it failed and offers to read again; it never reads as "nothing uses it".
+  - **A refused publish at the item.** A publish the server refuses for a dataset is placed on its measure or dimension and the designer's input (`Not published. Check Aggregate of the measure "Total Amount"`), in the Console's language, and shown at the dataset's editor as well as on its Pending changes entry. The server's own text stays under Details.
+  - **References read fixed.** `MetadataClient.references()` now reads the route's declared answer (`{ references: [{ type, name, label, path, kind }] }`) and maps each element to `MetadataReference` (`fromType`, `fromName`, new optional `fromLabel` and `kind`). It used to read a key the route never serves, so Setup's References tab and Studio's item tools showed "Nothing in the metadata graph points at this item. Safe to delete." for every item. An answer the declaration refuses is now a failed read.
+  - **Published surface.** `MetadataReference`, exported from `@object-ui/data-objectstack`, gains two optional fields, `fromLabel` (the referring item's label, when the server serves one) and `kind` (the served reference kind); existing fields are unchanged. `MetadataClient.references()` now accepts less: a `200` answer that `FindReferencesToMetaResponseSchema` refuses throws instead of resolving `[]`, so a caller must handle the rejection as it already does for a non-2xx answer; in this repository every caller reads it through `useReferencesScan`, which catches it and shows the failed-check state.
+- 56cac5e: feat(ui): undo a business-record delete from its toast, through the recycle bin
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  A delete of one business record (an object without the `sys_`, `cloud_` or `ai_` prefix) enters the recycle bin (ADR-0148). When the server answers with its `recycleBinEntryId` and the caller holds `allowRestoreOwnDeleted` on the object (read through `objectPermissionGrants`, so `manageRecycleBin` and `modifyAllRecords` grant it too), the "deleted" toast on the console list, the plugin list and the record page now carries an Undo action. Undo restores that entry under its original ids (`POST {data}/:object/recycle-bin/:entryId/restore`), never re-creates the record, refreshes the view and toasts "{label} "{name}" restored". On the record page, Undo also returns to the record.
+  
+  A refused restore toasts one sentence per reason, in the session language: another record now holds the same unique value, the parent record was purged, the package was uninstalled, the parent is itself in the recycle bin, the entry is gone, no permission, or no recycle bin on this deployment. An unknown code keeps the server's message. Without the grant, without an entry id, or for a batch delete, the toast is unchanged.
+  
+  The delete confirmation for a business record (one record and a selection, on the console list, the plugin list, the record page and the plugin detail view) is now the question alone ("Are you sure you want to delete this record?", "Delete N selected records?"). It no longer says "This cannot be undone." Platform objects keep today's copy.
+  
+  `@object-ui/types`: `DataSource.delete` options gain `onRecycleBinEntry?`, and `DataSource` gains an optional `restoreRecycleBinEntry?`. `delete` still returns a boolean. `@object-ui/data-objectstack` implements both. `@object-ui/core` exports `recycleBinRestoreRefusalText`, `RECYCLE_BIN_RESTORE_REFUSAL_KEYS` and the `RecycleBinRefusalLabels` type, and `recordDelete` gains `successToast`, `undo` and `entersRecycleBin`. `@object-ui/i18n` adds `objectActions.deleteConfirmQuestion`, `restoredNamed`, `restoreSuccess` and `restoreFailed`, `detail.deleteConfirmQuestion`, the `console.objectView.bulkDeleteQuestion` family and the seven `recycleBin.refusal.*` sentences to every pack.
+- 55d9dd4: feat(spec,service-analytics,data-objectstack): a dataset answer says, per measure, which records that measure counted (`drillScopes`)
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **`@objectstack/spec`: `AnalyticsResult.drillScopes?: Record<string, FilterCondition>`**, also declared on the `AnalyticsResultResponse` wire schema. Each selected measure name maps to the list filter, on the answer's `object`, that selects the records the measure aggregates: the dataset's own `filter`, AND the measure's own `filter`, AND, for a measure over a field, that field holding a value (both instants for a duration measure), with each `{token}` resolved as the query resolved it. It is `{}` when none of these applies. A measure that no list filter can select is left out: a derived measure, or a scope that names a relationship path (`account.region`, as a key or a `$field` reference). A measure left out offers no drill. A `__compare` column has no entry.
+  - **`@objectstack/service-analytics`: `queryDataset` sets `drillScopes` on every dataset answer that has rows**, on both query faces, from the same token-resolved filters the numbers were computed under. A drill that lists the clicked bucket (`dimensionFields` / `drillRawRows` / `drillRawTotals`, `drillRanges`) AND the widget's own filter AND this scope lists exactly the records the number counted. Before this, a drill built from the bucket and the widget filter alone listed every record in the bucket, so a filtered measure such as "paid invoices" showed 4 records behind the number 2.
+  - **`@object-ui/data-objectstack`: `queryDataset` passes `drillScopes` through**, typed as the spec slot. The adapter lists the keys it returns, so until now the sidecar was dropped before it reached a widget.
+- 98f640d: fix(plugin-designer): the fields page and the objects page save an object as its author wrote it, not as the console is served it
+  
+  Clause-②: yes
+  Metadata-protocol: none
+  
+  `MetadataFieldsPage` took its edit base from the item read and `MetadataObjectsPage` from the list read. The server translates both for the console's `Accept-Language` and fills both with the platform's injected columns (`owner_id` and the rest), and both pages spread that served object back as the save body. In a Chinese console one field relabel or one description edit therefore stored every other label of the object in Chinese, and the injected columns as authored fields. Both pages now build the save body on the object as authored, `overlay ?? code` from the layered read (`GET /meta/object/:name/layers`, served untranslated). The fields page shows and edits the authored fields. The objects page keeps showing the listed object as served and writes back only the keys the edit changed. When the layered read holds neither layer, the fields page says the object was not found and the objects page saves nothing and says why.
+  
+  `@object-ui/data-objectstack` now exports the reading itself, `authoredBuffer`, `authoredPublished` and `editsAuthoredLayers` with the `AuthoredBuffer` and `AuthoredLayers` types, beside `MetadataClient.layered`. `@object-ui/app-shell` re-exports them from its `authoredObjectBuffer.ts` with no change in behaviour, so its editors and plugin-designer's pages share one copy.
+- da3c742: fix(runtime,cli): the dispatcher's `/meta` permission refusal applies a deployment's `errors.permission_denied` override; `os package install` says which env variables count as credentials
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - `@objectstack/runtime`: the `HttpDispatcher` meta read gate now hands the request's i18n service lookup, as `RestServer` does, so an `errors.permission_denied` override reads the same on both doors. Without an i18n service, or when it fails, the built-in sentence is served and the refusal stays a 403.
+  - `@objectstack/cli`: the `--token` conflict refusal of `os package install` now says that `OS_RUNTIME_EMAIL`/`OS_RUNTIME_PASSWORD` count as `--email`/`--password`.
+  - `@object-ui/data-objectstack`: the README and a doc comment quote the current refusal sentence. No behaviour change.
+- 22ee4c4: fix(rest)!: `GET /api/v1/meta/_drafts` scopes by `?package=`, like every other metadata read, and refuses a query parameter it does not read
+  
+  Clause-②: yes (narrowing) — `GET /api/v1/meta/_drafts` (on the REST server and the runtime dispatcher) declares its closed query-parameter set, `package` and `type`, and refuses any other name, the retired `packageId` among them, with `400 VALIDATION_ERROR`, where it ignored it and answered the drafts of every package with `200`. The widening half: `@objectstack/rest` exports two new names, the door's query decision that both transports ask: `META_DRAFTS_QUERY_PARAMS` and `metaDraftsQueryRefusal`.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped: the protocol's ListDraftsRequest keeps its packageId field, and the SDK options keep their names. What moves is the drafts route's query-string spelling, and nothing at rest records it, so there is nothing for a migration to rewrite. -->
+  
+  **The package filter.** `GET /api/v1/meta/_drafts?package=ID` lists only that package's pending drafts. It reads the value the way `GET /meta/:type` and `GET /meta/diagnostics` read it: `?package=all` lists every package, and a package that is neither installed nor bound to a pending draft is refused with `400 INVALID_REQUEST`. Before, the door read only `?packageId=`, so `?package=ID` was dropped and every package's drafts came back with `200`.
+  
+  **BREAKING** accept-set narrowing at the drafts list (`@objectstack/rest`, `@objectstack/runtime`): a query parameter the door does not read is refused instead of ignored, and `?packageId=` is retired.
+  
+  - **Before.** `GET /meta/_drafts?packageId=ID` narrowed to one package. `?package=ID`, `?typ=view` or any other name was ignored, and the drafts of every package (or every type) came back with `200`.
+  - **Now.** Only `package` and `type` are read. Any other name, `packageId` included, is refused with `400` and the nested `{ "error": { "code": "VALIDATION_ERROR", "message" } }` body, whose message names the parameter and lists the supported ones; nothing is read. A bracketed `?package[]=` or `?type[]=` keeps its own located refusal.
+  - **Who moves.** `@objectstack/client`'s `meta.listDrafts({ packageId })` and `@object-ui/data-objectstack`'s `MetadataClient.listDrafts({ packageId })` keep their option name and now send `?package=`, as does the Console. A script that sends `?packageId=` gets the 400.
+  
+  **The remedy.** FROM `GET /api/v1/meta/_drafts?packageId=ID` TO `GET /api/v1/meta/_drafts?package=ID`. Upgrade `@objectstack/client` and `@object-ui/data-objectstack` together with the server.
+- f6b8985: fix(ui): a list refused with `400 INVALID_FIELD` names the field, and the column that asked for it
+  
+  Clause-②: yes (widening) — `@object-ui/i18n` gains two `list.*` keys (`loadErrorUnknownColumnMessage`, `loadErrorUnknownFieldMessage`) in every locale pack; the adapter's raw `$expand`/`$search` error gains a `details` member. Nothing that worked before is refused.
+  Metadata-protocol: none
+  
+  A list view whose query the server refuses with `400 INVALID_FIELD` used to show only "This view's query was rejected". The rejected panel now reads the refused field from the answer's structured `details.field` (never from its sentence):
+  
+  - when the field is one of the view's columns, it names the column (its authored label, else the field name), the field and the object, and says an administrator needs to correct or remove the column;
+  - otherwise it names the field and keeps the filter remedy.
+  
+  Every other 400, an `INVALID_FIELD` that names no field, and a refused search term keep the panel they had.
+  
+  `ObjectStackAdapter.find`'s raw `$expand`/`$search` branch now keeps the answer body on `err.details`, as `@objectstack/client` does (`details`, else `error.details`, else the whole body). Before, a view with a lookup column took that branch and lost the field.
+- d6b88f1: fix(service-storage): a member attaches a file from the browser again — the upload's own completion attaches it as them, restoring the Attachments panel after #31031
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  Skills-docs: updated here — `content/docs/permissions/attachments-access.mdx` and `content/docs/api/plugin-endpoints.mdx` state the `attachTo` key of the upload-complete request and its refusals; no file under `skills/**` teaches the upload-complete request (a `git grep` of `skills/` finds no `upload/complete` and no `CompleteUploadRequest`).
+  
+  A signed-in member who may attach files, and holds no read of `sys_file`, can attach a file from a record's Attachments panel again. Since the write-time reference check began judging a `lookup` value through the caller's own read door, the panel's second step — `POST /api/v1/data/sys_attachment` naming the file it had just uploaded — was refused `400 VALIDATION_FAILED` (`file_id`, `reference_not_found`) for such a member.
+  
+  The rule now: the upload-complete door (`POST /api/v1/storage/upload/complete`) takes an optional `attachTo: { parentObject, parentId }`. With it, the door runs every gate it already asked — the session, the upload ownership rule, the starting organization, the held bytes — and then hands the upload to the file-attachments service's `attachUploadAs`, which runs as the caller. That verb vouches for one `sys_file` only: a `pending` upload in the `attachments` scope that the caller uploaded, that no record holds yet, in the caller's write reach and in the parent's organization. It asks the attach authorization first (the permission to create an attachment, the parent-edit attach rule, `enable.files`), then writes the `sys_attachment` row and commits the file as one unit. The answer is the committed file with its new `attachmentId`. Another user's upload id, an id that names no file, a committed or already attached upload, and a record the caller may not attach to are refused, and the upload stays `pending`.
+  
+  The vouch is spent on that one write: a hook that runs under it — as the user or as the system — writes without the mark (`withoutVouchedReferences`, `@objectstack/core`), so a hook naming the same `file_id` is judged through the caller's read door.
+  
+  Unchanged: no caller gains a read of `sys_file` or of anything else. The generic data door keeps its rule — a `sys_attachment` create through `POST /api/v1/data/sys_attachment` naming a `sys_file` the caller cannot read is still refused `reference_not_found`. A completion without `attachTo` commits exactly as before. A mount with no file-attachments service bound refuses `attachTo` with `501 NOT_IMPLEMENTED`.
+  
+  The console's Attachments panel (`@object-ui/app-shell`) now completes its upload with `attachTo` and makes no second call, keeping its refusal messages; the upload adapter (`@object-ui/data-objectstack`) gains an `attachTo` option and returns the `attachmentId` it receives.
+- Updated dependencies [d0512c2]
+- Updated dependencies [4261169]
+- Updated dependencies [b5fd350]
+- Updated dependencies [ac5d0ce]
+- Updated dependencies [2cf269f]
+- Updated dependencies [604a2b3]
+- Updated dependencies [e396095]
+- Updated dependencies [f810c34]
+- Updated dependencies [7a5f73e]
+- Updated dependencies [7d0b47c]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [c2be734]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [af3451b]
+- Updated dependencies [3a27208]
+- Updated dependencies [0c666c3]
+- Updated dependencies [38717d3]
+- Updated dependencies [ac890f5]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [25fea77]
+- Updated dependencies [ea5807e]
+- Updated dependencies [d3f23d2]
+- Updated dependencies [ff12aed]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bff5ba2]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [31260ca]
+- Updated dependencies [2046d21]
+- Updated dependencies [243eba1]
+- Updated dependencies [fd749a4]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [56cac5e]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [a91409c]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [590724f]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [aad1603]
+- Updated dependencies [ad2393f]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [a59d00a]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [5268f50]
+- Updated dependencies [5268f50]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [c77dd17]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [b631573]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [6bd00d2]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [ed4b832]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [e11a575]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [e735425]
+- Updated dependencies [1f37085]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [47bc621]
+- Updated dependencies [0c0ede0]
+- Updated dependencies [22ee4c4]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [ef4af73]
+- Updated dependencies [7e697ff]
+- Updated dependencies [d9a232f]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [0cd594b]
+- Updated dependencies [f9eaba2]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [e627eaa]
+- Updated dependencies [6be71ab]
+- Updated dependencies [732def5]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [26d30d7]
+- Updated dependencies [3684d18]
+- Updated dependencies [3684d18]
+- Updated dependencies [ac8fede]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [3191e00]
+- Updated dependencies [de6d893]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [133f75a]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [e1dac19]
+- Updated dependencies [bb47215]
+- Updated dependencies [44a030b]
+- Updated dependencies [21510bb]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [63a470a]
+- Updated dependencies [b463ec6]
+  - @object-ui/core@18.4.0
+  - @object-ui/types@18.4.0
+  - @objectstack/spec@18.4.0
+  - @objectstack/client@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes

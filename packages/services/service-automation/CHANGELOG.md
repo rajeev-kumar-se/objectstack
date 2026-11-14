@@ -1,5 +1,727 @@
 # @objectstack/service-automation
 
+## 18.4.0
+
+### Minor Changes
+
+- 04f36b6: feat(service-automation): a record-triggered flow's notification opens the record that started the run, without the author writing `sourceObject` and `sourceId`
+  
+  Clause-②: no — no accepted key, value or exported type changes; the node's existing `sourceObject` / `sourceId` / `actionUrl` keys keep their meaning when written.
+  Metadata-protocol: semantic
+  
+  - **Before.** A `notify` node built its click-through link only from an explicit `sourceObject` + `sourceId` pair (or an `actionUrl`). The obvious record-triggered flow — `recipients`, `title`, `message` — passed `os validate` and sent a notification whose link was empty, so a click opened the notification list instead of the record.
+  - **Now.** A `notify` node that writes none of `sourceObject`, `sourceId` and `actionUrl` links to the run's trigger record when the run has one: a record change (create or update), a time-relative sweep's row, or an action started on a record. The notification stores that record as its `source_object` / `source_id`, and the inbox opens `/OBJECT/ID`.
+  - **Unchanged.** An explicit pair or an explicit `actionUrl` wins, as before. A half-written pair is still dropped rather than defaulted. A run with no trigger record (a schedule, an inbound API post, a manual start with no record) links nowhere, as before. A delete event is not linked: its record is gone once the write lands.
+  - **To link elsewhere** from a record-triggered flow, write the `actionUrl` or the `sourceObject` + `sourceId` pair the notification should open.
+- 1ce6e0f: fix(service-automation)!: registration refuses a flow whose own graph holds no `start` node, so `POST /api/v1/automation` answers 400 at the save instead of storing a flow that fails only at its first trigger (#32142)
+  
+  Clause-②: no (narrowing) — `AutomationEngine.registerFlow` refuses a definition it accepted before: one whose top-level `nodes` carry no `type: 'start'` member. Nothing is widened.
+  Metadata-protocol: narrowed
+  Skills-docs: none — every flow `skills/objectstack-automation` teaches already opens with a start node, and the refusal text carries the cure.
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no key, value or spelling is retired and no stored row can be rewritten mechanically: a start node carries the flow's trigger, which only its author knows, so the refusal text names the cure and `os migrate meta --stored` lists each such row -->
+  
+  **BREAKING** accept-set narrowing at every door that registers a flow: the automation write doors (`POST /api/v1/automation`, `PUT /api/v1/automation/NAME`), the boot pull, the `kernel:ready` bind and the metadata-change sync.
+  
+  - **Before.** A flow with no `start` node (an empty `nodes` list included) registered in any status, the write door answered `200`, and the flow failed only when run: every trigger and every explicit run answered `422 FLOW_NO_START_NODE`.
+  - **Now.** Registration refuses it, in a message that opens "Flow 'NAME' rejected: the flow's top-level nodes hold no start node" and names the node types it found and the cure. The write doors answer `400 VALIDATION_FAILED` and register nothing. The check runs first among the registration checks and is status-agnostic, as they are: a `draft` flow is enabled in this engine and fails its first run the same way. A start node inside a region body (`loop`, `parallel`, `try_catch`) does not count; a region is entered at its single entry node.
+  - **Stored rows.** A flow stored with no start node no longer arms at boot. The boot completes; the bind warns, names the flow and records the refusal, and the metadata read serves the stored row unchanged beside `registration: refused` with the engine's words. `os migrate meta --stored` lists each such row as a `registerFlow` TODO at `flows[0].nodes`. The metadata save door still keeps a start-less draft mid-edit; the engine records the same refusal for it.
+  - **Unchanged.** A flow with a start node registers as before. The run-time `FLOW_NO_START_NODE` exit and its `422` mapping stay in place.
+
+### Patch Changes
+
+- 9ed2ee1: refactor(metadata-core): the customization pair of a package is looked up through the App that carries it
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  `@objectstack/metadata-core` exports `pairOf(base)`, `isPairOf(pairId, base)` and `appOf(packageId)`: the pair of a package is `customizationPackageId(appOf(base))` (ADR-0146 D3, with the customization unit being the App per ruling record 6691022506). `appOf` is the identity today, so every package is still its own App for customization and every answer is the one `customizationPackageId` / `isCustomizationPairOf` gave before: the same pair ids, the same refusals, the same served overrides, write gates, list and layered reads, uninstall refusal, flow precedence remedy and datasource import landing.
+  
+  The served `/meta` reads and writes, the ensure-customization door and the package routes answer exactly as before. Code that asks "which pair customizes this package?" should call `pairOf` / `isPairOf` instead of the spec id rule directly; the parse direction (`customizationBasePackageId`, `isCustomizationPackage`) is unchanged.
+- 769adff: feat(metadata-protocol, metadata-core)!: the ensure door creates no customization pair for a kernel package, and every pair question carries the installed manifests
+  
+  Clause-②: yes (narrowing) — both arms. Narrowing: `POST /api/v1/packages/:id/ensure-customization` (and the protocol's `ensureCustomizationPackage`) answers a kernel base, a package of scope `system` or `cloud`, with `409 RESOURCE_CONFLICT` and a sentence saying kernel objects are not customizable in this version, where it created `<id>.custom`; `POST /api/v1/automation/:name/clone` of a flow a kernel package ships, with no `package` named, answers that `409` where it answered `200` with the copy in `<id>.custom`; and the exported `pairOf`, `isPairOf` and `appOf` (`@objectstack/metadata-core`), `isServedOverrideRowOf` and the `installed` member of `OverrideWriteClosure` (`@objectstack/metadata-protocol`), and `resolveFlowPrecedence` / `describeFlowContender` (`@objectstack/service-automation`) take the installed-manifest lookup as a required argument. Widening: five new exports, `installedManifestsOf`, `InstalledManifestLookup`, `AppLookupManifest` and `InstalledPackageSource` (`@objectstack/metadata-core`) and `kernelPackageScope` (`@objectstack/metadata-protocol`), and one new `noticeCode` value on the permission-set clone answer, `PERMISSION_SET_CLONE_ENVIRONMENT_WIDE_KERNEL_SOURCE`, for a copy of a kernel-shipped set that now lands environment-wide.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no key of any schema is added, removed or re-shaped and no stored row is read differently, converted or dropped: the narrowing is one runtime refusal at one door, for one kind of base, whose remedy is that no pair exists to create; the existing pairs and the overrides in them stay served exactly as before. The retyped exports are runtime functions with no metadata surface, and the compiler names every caller that has not passed the new argument, so there is nothing for `objectstack migrate meta` to rewrite. -->
+  
+  **BREAKING** for a caller that ensures the customization pair of a kernel package — a platform package of scope `system` (users, organizations, security, settings and the rest of the platform suite) or `cloud` — and for a TypeScript importer of the pair helpers named above.
+  
+  - **Why (ruling records 6691022506 and 6691217245 on ADR-0146 D3).** The customization unit is the App, and the kernel is not an App a customer owns: it ships with the runtime, at the runtime's version (installing it whole is the goal ruling 6691022506 records, not yet what every `serve` tier does). In this version no kernel object is customizable, so the door creates no pair for one. Which kernel objects a later version opens (a whitelist) is that version's decision.
+  - **What the door answers.** `409 RESOURCE_CONFLICT`, the status and code the door already answers when a base's state rules the pair out (a writable base, no namespace, a version that is not SemVer). Nothing is created or written. Every other base is answered exactly as before.
+  - **A kernel pair that already exists stays.** An earlier version of the door may have created `<kernel id>.custom` on a deployment. It stays installed, the overrides inside it stay served by every read of the kernel item's name, and a further save into it is still admitted. Only the ensure call is refused.
+  - **A copy of a platform permission set.** `POST /api/v1/security/permission-sets/:name/clone` with no `package` named landed the copy of a kernel-shipped set (`member_default` and the platform's other sets) in `<kernel id>.custom`. It now saves the copy environment-wide, as it already does for a set authored in the environment, with the notice code `PERMISSION_SET_CLONE_ENVIRONMENT_WIDE_KERNEL_SOURCE` and a sentence naming the kernel package and `package`. A Console that does not know the new code shows that sentence as sent. Naming a writable package with `package` still lands the copy there. The flow clone door answers a kernel-shipped flow with the ensure door's sentence.
+  - **The closes stay shut on a kernel item.** A package-less write, or a write naming the kernel package, onto an item a kernel package ships is still refused `403 NOT_OVERRIDABLE` exactly where it was refused before (ADR-0146 D11). The sentence no longer names the pair as the fix, since there is none to ensure: it says kernel objects are not customizable in this version. A later version's kernel whitelist is what opens such an item.
+  - **The lookup.** Which pair customizes a package is asked through the installed manifests of the registry the caller serves (`installedManifestsOf(registry)`). Today the answer is unchanged for every package: `appOf` is still the identity. The argument is threaded through every site now so that resolving a module to its App is one change in `appOf`.
+  - **`os validate`'s customization-namespace advisory** now skips a package that is itself a pair through `isCustomizationPackage`, the one spelling of that question. An id ending in `.custom` that no base derives (`a.custom.custom`, a bare `.custom`) is now judged like any other package.
+  - **Who moves, and the fix.** A script or client that ensured a kernel package's pair drops that call: the kernel item is served as it ships, and an existing pair keeps serving what it holds. A vendor package that declares `scope: 'system'` or `'cloud'` in its own manifest is read as kernel here, as `isWritablePackage` already reads it; its remedy is to drop the scope, which belongs to the platform's own packages. A TypeScript importer of the helpers passes `installedManifestsOf(engine.registry)`, or `installedManifestsOf(undefined)` where it holds no registry.
+- 4be9734: fix(automation)!: a `currency` or `percent` screen field refuses a non-number on resume, as a `number` field does, and the console renders `percent` as a numeric input (#30178)
+  
+  Clause-②: yes (narrowing) — `POST …/runs/RUN/resume` refuses a string under a `type: 'currency'` or `type: 'percent'` screen field, a bag it accepted before. Nothing is widened.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no stored row changes: ScreenFieldConfigSchema keeps its shape, and the screen-field type stays an open widget hint. What narrows is the resume door's accept set for one value shape on two existing members, so there is nothing at rest for a migration to rewrite; the caller sends a JSON number. -->
+  
+  **BREAKING** accept-set narrowing at the screen-flow resume door.
+  
+  - **Before.** A `type: 'percent'` or `type: 'currency'` screen field took any string on resume: `"75"` under a `max` of 60, `"abc"` too. The bound compares numbers, so it never judged a string, and the run consumed its suspension on the value. The console rendered `percent` as a text input and posted a string, so a `percent` field's `min` / `max` held for no console user.
+  - **Now.** `number`, `currency` and `percent` are one value domain: a present value that is not a finite JSON number is refused with `invalid_type` inside `400 INVALID_SCREEN_INPUT`, the suspension is kept, and a corrected resume still lands. A numeric string is not read as the number it spells. The console renders `percent` as a numeric input carrying `min` / `max`, so it posts a number and the browser stops an over-limit value before any request.
+  - **Unchanged.** An absent value and a hidden field are not judged; `rating`, `slider`, `progress`, `text` and untyped fields still take a string; a JSON number on `currency` / `percent` is judged against the bound as before.
+  - **For a caller that skips the console.** The resume bag carries the JSON number (`60`), not a string; the refusal names the field and says it must be a number. No stored metadata changes, so there is nothing for `objectstack migrate meta` to rewrite.
+- fd749a4: feat(audit): a write made while an administrator impersonates a user now records the administrator
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  
+  An administrator who impersonates a user writes as that user, and until now nothing on the write said otherwise: the `sys_audit_log` row, the `sys_activity` row and the record were byte-identical to the user's own work. The session already knew (`sys_session.impersonated_by`); the write did not.
+  
+  - `ExecutionContext.impersonatedBy` (new, optional, attribution only) carries the administrator's `sys_user` id. The shared request-identity resolution sets it from the session read that admitted the caller, for a session credential only. `HookContext.provenance.impersonatedBy` hands it to hooks; it is never folded into `session`, so a hook that gates on the caller still sees the impersonated user.
+  - `userId`, `created_by`, ownership, `current_user.*` RLS and every permission stay the impersonated user's. Nothing in the authorization path reads the new field.
+  - The audit writer stamps `sys_audit_log.metadata.impersonated_by` on record writes and on `action_invocation` rows, and `impersonated_by` plus `impersonated_by_name` in the `sys_activity` row's metadata. Each key is present only on such a write; its absence means the user acted themselves. `user_id` and `actor` do not move.
+  - A flow started from such a session carries the administrator onto its own writes (`AutomationContext.impersonatedBy`), on both `runAs` arms: a record-triggered flow, a manual `POST /:name/trigger` and a `type: 'flow'` action alike. After an approval decision the decider's segment carries none.
+  - The console's record timeline and field history read 「Dev Admin 代王工操作」 (`detail.impersonatedActor`, in all ten console languages).
+  
+  No schema column and no migration: older rows simply carry no key.
+- 6c4c43a: fix(service-automation,mcp): a time-relative flow's conditions are typed against the object its sweep scans, at registration and in the `validate_expression` advice
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - **`@objectstack/service-automation`**: the registration pass's advisory schema check (the logged `unknown field` / typo / type-mismatch warnings) typed a time-relative flow's conditions against the start node's `config.objectName`, while the run binds a row of `config.timeRelative.object`. A flow stored with a start naming another object kept a warning on a field that is right for the scanned object and none on a field that fails at run time; a start naming no `objectName` got no schema check at all. The pass now reads the object off the flow's trigger binding, the same answer the run uses: `timeRelative.object` when it is a string, `config.objectName` only otherwise. Every other flow is typed as before. The warnings stay logged, never thrown.
+  - **`@objectstack/mcp`**: `validate_expression`'s description, its `sweepObject` input text and the SKILL.md line no longer advise passing a `sweepObject` other than `objectName` as a supported shape. They say to pass the scanned object as `objectName`, and that a start whose `objectName` names another object is refused at publish (`flow-time-relative-object-mismatch`). The tool's inputs and verdicts are unchanged.
+- 3479c33: docs(automation): the notify click-through default says a before-create run links to its record only when the caller wrote the id
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A `notify` node that writes none of `sourceObject`, `sourceId` and `actionUrl` links to the run's trigger record when the run has one. Four texts enumerated that run as "a record change other than a delete", which includes a before-create run (`record-before-create`, or the insert leg of `record-before-write`). On that run the record is the write's input, and the driver issues the id at the write, after the hook, so the input carries an id only when the caller wrote one; with no id the notification links nowhere. The runtime is unchanged. The texts now say "a record change other than a delete or a before-create", and that a before-create run links only when the caller wrote the id:
+  
+  - the `NotifyConfigSchema` docblock and the `sourceObject` / `sourceId` descriptions in `@objectstack/spec`, and the reference page generated from them;
+  - the `notify` node's docblock and config descriptions in `@objectstack/service-automation`, which is the wording source;
+  - the Flows guide and the automation skill's `notify` example.
+  
+  The same texts said that a `sourceId` evaluating to `null` "leaves the key unset". It is a written key: the node then writes a half pair, which is dropped rather than defaulted to the trigger record. The node's failure text, the guide and the schema say so.
+  
+  A test pins that a notify on a `beforeInsert` run whose record carries no id writes no `source_object` / `source_id`, and that one whose caller wrote the id links to it. No key, shape, default or refinement changes.
+- 9038187: fix(audit): name the impersonating administrator on identity writes and on an approval decided while impersonating
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  Two writes an administrator makes while impersonating a user still read as the user's own in the audit ledger. Both now carry the same attribution-only `impersonatedBy` a record write from that session already carries, recorded as `sys_audit_log.metadata.impersonated_by`. `user_id`, `actor` and every permission stay the impersonated user's.
+  
+  - **Identity-table writes (`@objectstack/plugin-auth`).** A write better-auth makes on the user's behalf (renaming the profile, changing an email, a membership change, an admin route such as set-user-manager) runs as the system and is credited to the user through `attributedUserId`. On an impersonation session it now also names the administrator, read from the session row's `impersonatedBy`, never from the request body. `authSystemWriteContext()` builds it, and the adapter's `withSystemContext` writes now use that same builder. `resolveAttributedActor()` (new) answers the user and the administrator together; `runAttributedToUser()` also accepts the admitted actor object, whose new optional `impersonatedBy` the platform-admin gate fills from the session.
+  - **The approval decider's segment (`@objectstack/spec`, `@objectstack/plugin-approvals`, `@objectstack/service-automation`).** `ResumeSignal.impersonatedBy` (new, optional) names the administrator when the decider decided from an impersonation session. It is honoured only beside `resumedBy`, on a signal carrying `RESUME_AUTHORITY_SERVICE`, so an HTTP body cannot set it. The approvals decision door fills it from the decision request's context, and a stranded decision's journal keeps it for the replay. The nodes after the decision now carry exactly the decision's administrator, and none when the decider acted in their own name. Before this, a trigger user deciding their own run kept the stamp of the write that started it, and a decider deciding while impersonated carried none.
+  
+  No schema column and no migration.
+- efbe1a0: fix(service-automation)!: a screen-flow resume refuses a non-string value for a text-like field before the pause is consumed (#31491)
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any authorable schema is added, removed, renamed or re-shaped, and no flow an author wrote is refused. What moves is the answer a screen-flow resume gets when it sends a non-string for a text-like field, and nothing at rest holds that answer, so there is nothing for a migration to rewrite. -->
+  
+  **BREAKING** accept-set narrowing at the screen-flow resume door (ruling A+).
+  
+  - **Before.** A `type: 'text'`, `'textarea'`, `'email'`, `'url'` or `'phone'` screen field took any JSON value on resume, and the run consumed its suspension on it. An object then failed the run at the record write downstream, with no pause left: a corrected resume answered `RUN_NOT_FOUND`. A number was stored as the text it prints, a value the caller never sent.
+  - **Now.** The five kinds are one value domain, a JSON string. A present object, number, boolean or array is refused with `invalid_type` ("must be a string") inside `400 INVALID_SCREEN_INPUT` before the suspension is consumed, so the run stays paused and a corrected resume completes it. A value is not coerced: `42` is not read as `"42"`.
+  - **Unchanged.** An absent value, `null`, the empty string and a hidden field are not judged, and a missing required field is still refused as missing. Only the shape is checked: the format of an email, URL or phone number is not, and any other refusal of a string downstream keeps the operator restore as its exit. Untyped fields and the other kinds are not affected.
+  - **Headless callers.** An MCP `run_action` caller that supplies a non-string for one of these fields has not answered the screen, so the screen stays interactive, as it already does for a non-number on a numeric field.
+  - **For a caller that skips the console.** The resume bag carries a JSON string for these fields; the refusal names the field and says it must be a string.
+  - **Two console paths now stop at Submit.** The console posts what the screen serves it, so two authored shapes now get the 400 at Submit, with the run still paused: a text-kind field whose `options[].value` is a number or a boolean, when the user picks that option; and a text-kind field whose served `defaultValue` resolves to a non-string, when the user submits it unedited. The author fixes the screen (string option values, a string default) or types the field to match its values. No stored metadata changes, so there is nothing for `objectstack migrate meta` to rewrite.
+- 9e1f1f9: fix(cluster): a Redis outage no longer crashes replicas, is logged once, and caches re-read on reconnect
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  Every API addition below is a new export or an optional member (a widening). The one new default is the bounded command time on the redis driver. Multi-replica deployments on the `redis` cluster driver only. The single-node default (the in-process `memory` driver, no declared replicas) behaves exactly as before: it never loses a connection, so none of the paths below runs on it.
+  
+  - **No crash on a dead lock (`@objectstack/service-job`).** `CronJobAdapter` leader-elects every scheduled fire on the cluster lock. When the lock store was unreachable, `acquire` rejected inside a timer callback, the rejection went unhandled, and every replica exited at its next tick. A failed `acquire` now skips that fire (no node can prove it alone runs it) and the next tick asks again; a failed `release` after the fire ran is absorbed (the lease expires on its TTL). The adapter logs ONE warning per lock outage — not one per tick — and one info line when the lock answers again. No process-wide `unhandledRejection` handler is added.
+  - **The driver watches its connections (`@objectstack/service-cluster-redis`).** Every ioredis client the driver holds (the command connection and the pub/sub subscriber) now has an `error` listener, so ioredis no longer prints `[ioredis] Unhandled error event` with a stack per reconnect attempt. The driver logs one warning when the store becomes unreachable (naming `host:port`, never the URL or a password) and one info line when it returns. New option: `driverOptions.logger` (`{ warn, info? }`, default `console`).
+  - **Bounded commands.** `createRedisClient()` now sets `commandTimeout: REDIS_COMMAND_TIMEOUT_MS` (2000 ms; exported). A black-holed Redis (a socket that accepts and never answers) used to hold a caller about 30 s — a sign-in counting through the shared cache included, since the cache derives its connection with `client.duplicate()`, which inherits the bound. Every command the driver and the shared cache issue is O(1); a caller that needs longer passes its own `options.commandTimeout`, or its own client through `driverOptions.client`.
+  - **`cluster.resync` (`@objectstack/service-cluster`).** Cross-node cache hints ride at-most-once pub/sub, so a hint published during an outage was lost and a peer kept serving what it had cached until restart. When the driver's connection returns after an outage it now emits ONE local `cluster.resync` event (never published to peers). New exports: `onClusterResync(cluster, handler)` to subscribe (a no-op on the memory driver), `readClusterDriverHealth(cluster)` (a passive reading of the driver's connection state, type `ClusterDriverLivenessHealth`: `{ driver, nodeId, state: 'unknown' | 'up' | 'down', since, outages, lastError? }`, `undefined` on the memory driver; the active store probe `/ready` uses is `probeClusterDriverHealth()`), and `ClusterDriverLiveness` / `offerClusterDriverLiveness` for driver authors, plus `CLUSTER_RESYNC_EVENT`, `describeConnectionError` and `redactCredentials`.
+  - **The caches re-read on it.** `MetadataClusterBridgePlugin` calls each attached lane's resync seam: `MetadataManager.resyncClusterPubSub()` (`@objectstack/metadata`: drops every list cache and the endpoint index, so the next `list()` re-reads the loaders; registry entries are kept), `DatasourceAdminService.resyncDatasourceMutationPubSub()` (`@objectstack/service-datasource`: re-converges every stored datasource and every held pool from this replica's own read), and `AutomationEngine.resyncConnectorCredentialPubSub()` (`@objectstack/service-automation`: the connector reconcile a peer's signal runs; the connector-credential door gains an optional `resyncFromCluster()`). `AuthzClusterBridgePlugin` advances the engine's write epoch (reason `remote`), retiring cached grants. The `metadata.mutated` registry lane has no resync yet; it still converges per item on delivered signals and fully at boot.
+- 55c4e95: feat(service-automation)!: the flow index and the activation ledger consult on (package, name), through the one package-scoped resolver (ADR-0150 D3/D4)
+  
+  Clause-②: no (narrowing) — a `subflow` or `map` node inside a packaged flow names its child by a bare name, and that name now resolves from the package that ships the flow (ADR-0150 D3): its own flow, else the one holder in its declared dependency closure (plus `sys`), else a refusal naming every candidate. Three cases that run today are refused: a name only an environment-authored flow holds (D3 (a)); a name only a package outside the caller's declared closure holds (D3 step 3); and a flow name two packages hold, which only a deployment sealed with a clash that predates phase 1 reaches (#31677 Q1, ruled A). No door, request or response shape, error code or status changes. One answer moves the other way, in a sealed clash only: an activation row of package Q, which still holds the flow name beside package P, no longer switches off P's same-named flow (below).
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of the package root is removed or retyped; one type (FlowNameResolver) and one engine method (setFlowNameResolver) are added. The refusal is a run result naming the candidates, with no stored shape for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** for a packaged flow whose `subflow` or `map` node names a flow its package cannot reach: one authored in the environment, or one shipped by a package it does not declare a dependency on. Measured first-party: 0 (every `subflow` / `map` `flowName` in this repository names a flow of its own package).
+  
+  - **Before.** The engine looked the child up by its bare name alone, whoever held it.
+  - **Now.** The child resolves from the calling flow's package through `resolvePackageScopedName` (`@objectstack/objectql`). A refused call fails the node with the resolver's sentence, which names every holder and the remedy; the child never runs.
+  - **Unchanged.** A child the calling package holds, or that one package in its declared closure holds, runs as before. A door, a trigger or any caller outside a run resolves environment-wide, so every bare name with one holder answers as before. A flow the registry knows nothing of (registered straight into the engine) has one holder and runs as before. An engine with no ObjectQL registry answers as before.
+  - **Also.** The activation ledger's projection is keyed by `(package, name)`. The row of the package that ships the name decides for it, in either state. A row of another package that still holds a flow of that name keys only that package's flow, so it no longer switches the shipping package's flow off; only a deployment sealed with a pre-phase-1 clash has two such holders. A stale row, one whose package no longer holds the name, still switches the name off as before, and the engine now warns once naming both packages and the remedy: switch the flow again, which writes the shipping package's own row. A row that names no package, or any row when the engine cannot tell which package ships the name, switches the name off as before.
+  - **Also, a name two packages hold.** It is refused at registration, naming both, instead of arming the lexicographically first package's flow, and a run of it is refused the same way. Phase 1 refuses a second holder at install, so only a deployment that held the clash before phase 1 reaches this: its cold boot still seals with a warning (`BARE_NAME_COLD_BOOT_MODE = 'warn'`), and now neither flow is armed; the boot log names both. Measured first-party: 0 (across every boot of the dogfood battery, the cold boot's bare-name warning names one flow, the QA fixture's `qa_shared_flow`). The remedy is the warning's: rename one of the two flows.
+  
+  **The remedy.** Declare a dependency on the package that ships the child (ADR-0141), or ship the child in the calling package. For an environment-authored child, move it into a package the caller depends on.
+- 5d17aa6: feat: a `connector_action` names its connector from the calling flow's package (ADR-0150 D3/D4)
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A flow's `connectorConfig.connectorId` is now resolved through `resolvePackageScopedName` from `@objectstack/objectql`, as the package that ships the flow: its own declared connector instance, else the one holder in its declared dependency closure, else a refusal naming every candidate. An environment-authored flow names it with no package, as before.
+  
+  Who is affected: a packaged flow whose `connector_action` names a declared connector instance its package can't reach: one held only by a package outside its declared dependencies, one only the environment authored (ADR-0150 D3 (a)), or one two packages in its closure both declare. That node was dispatched to whatever instance the engine held under the name; it is now refused, and the error names every candidate. Declare the dependency, or ship the instance in the flow's own package. First-party count: 0. Every first-party packaged flow names its own package's instance or a connector a plugin registers in code, which is no registry item and dispatches as before.
+  
+  Corrected beside it: which package a flow run names its references from. It is the package only while that package's OWN body is armed under the flow's name (`AutomationEngine.armedFlowPackage`; the engine records where each armed body came from at every `registerFlow`). An environment override of a packaged flow, whether a package-less stored row or the shipping package's declared `.custom` override, names its `connector_action` connector and its `subflow`/`map` flow with no package, as ADR-0150 D3 says an overlay's references do. Before this, E1's subflow reader read the package that ships the flow name, so an override's subflow name resolved from that package; it now resolves as it did on main before E1. That is a loosening back to the earlier answer, not a new narrowing.
+- 1a2361c: feat: a declared connector instance's name resolves by (package, name) through the shared package-scoped resolver (ADR-0150 D3/D4)
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  Which declared connector instance a name materializes is now answered by `resolvePackageScopedName` from `@objectstack/objectql`, never by list order. The connector reconcile reads the whole environment's declaration, so it asks as a caller with no package: the environment's own item, else the unique package holder, else a refusal that names every candidate.
+  
+  Who is affected: nobody today. Phase 1's one-holder refusal still holds for `connector`, so no two installed packages can ship the same connector instance name, and every name resolves exactly as before. Once that backstop narrows (its own later release), a name two packages ship is not materialized, and boot fails naming both packages, as it already did for a duplicate instance name (which named no candidates).
+  
+  `@objectstack/service-automation` now depends on `@objectstack/objectql` at runtime (it was a dev dependency).
+- 2735ca4: feat(service-automation, plugin-approvals, plugin-email, trigger-schedule): automation stored references gain a package column, and a scheduled flow's dispatch key names its flow's package (ADR-0150 D8 R7–R11, R20)
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  Five stored references that name a flow, a connector instance or an email template by its bare name now carry, beside the name, the package that holds it: `sys_approval_request.process_package` on open requests (R7: `pending` and `returned`), `sys_automation_run.flow_package` on paused runs (R8), `sys_flow_credential.flow_package` (R9), `sys_connector_connection.connector_package` (R11) and `sys_email_template.package_id` on legacy template rows (R20). Each is nullable, read-only to users, and filled in by the platform.
+  
+  At every boot, once the registry has sealed its holders, each table's rows that name no package are walked and asked the one ADR-0150 D3 rule with no caller package: the item's one holder in this environment. An environment override of a package's flow is that package's flow overlaid, so its runs and requests bind to that package. A name only the email service's built-in templates hold binds to `com.objectstack.service.email`. A name two or more packages hold is left null and logged as a warning naming every candidate; it is never bound to the first. A name only the environment or the platform holds, or that nothing holds, is left null and reported. A row that already names a package is never read again, so a second boot writes nothing.
+  
+  The once-per-window dispatch key in `sys_flow_dispatch` (R10) now names the flow's package: `schedule:PACKAGE:FLOW:WINDOW` and `time-relative:PACKAGE:FLOW:SCOPE:RECORD`. A flow the environment holds, or nothing holds, keeps the old shape. At boot, keys claimed inside the ledger's 30-day retention gain a copy under the new key with the same claim time and outcome, and the old rows stay until the retention reaper removes them. The ledger holds every claim, settle and read until that copy has run, for at most two minutes, so a trigger's first claim after the upgrade sees the window as claimed. A claim also inserts the window's old key first, and the scoped key second: whoever inserts the old key wins the window, so during a rolling upgrade a node of an older release, which claims only the old key, and a node of this release share one arbiter in either order, and the old key settles beside the new one. A replay check and a missed-run check also read a claim under the old key as the window's claim. So no window fires twice across the change. The one case that claims no old key is a flow two packages hold: its old key would be one row for both, so each package claims only its own key. That case is unreachable while a second package's same-named flow is refused at registration.
+  
+  Nothing else reads the new columns yet, writers do not stamp them, and no other unique key changes. If a boot pass fails, it logs a warning, leaves its rows as they are and is tried again at the next boot.
+- c62e72a: feat(automation)!: the engine holds, arms and runs flows by `(package, name)`, so two packages' same-named flows are both armed, each in its own slot (ADR-0150 D4, part of #31696)
+  
+  Clause-②: yes (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export is removed or renamed. What narrows is runtime behaviour (a composition with no flow-name resolver, and a credential save under a name two packages hold), so there is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** accept-set narrowing in `@objectstack/service-automation`, in two places (listed below), both in favour of the ADR-0150 red line that a bare name two packages hold is never resolved by picking one of them.
+  
+  Before, when two packages shipped a flow of the same name, the boot pull armed neither and logged a collision. Now each package's flow is armed in its own slot. While one package holds a name, its slot is filed under the bare name, so every key, log line and answer stays as it was. While two packages hold it, each slot is filed under `PACKAGE/NAME`.
+  
+  - A bare name with two holders is refused with `RESOURCE_CONFLICT`, naming both. This covers `execute`, `getFlow`, `toggleFlow`, `unregisterFlow`, `withdrawFlow`, the version history, the rollback and the flow credential reads. The engine never picks one. A name the registry holds under two packages counts as two holders even while the engine holds only one of their flows (the other's body refused): the bare doors still refuse it, and that one slot is reached only by its own package and not armed on its trigger. The slot doors (`executeSlot`, `getFlowSlot`, `getFlowSlots`, `flowSlotKey`, `toggleFlowSlot`, `withdrawFlowSlot`) serve each holder.
+  - No flow name contains `/`, so a bare door answers a `PACKAGE/NAME` spelling as a flow it does not hold (`execute` and `toggleFlow`: not found; `getFlow`: `null`; the version history: empty). Main answered the same, since no flow was named so.
+  - The only new way a flow of a sealed-clash name runs in this release is a `subflow` or `map` call from a flow of its own package, which resolves the shared name from the caller's package. Triggers stay off for such a flow until the trigger packages bind by slot, and say so once per slot.
+  - A run reads its own flow: a screen's progress and a stored run go by the run's own package. A paused run (`sys_automation_run.flow_package`) is stored as its flow's name and package, never as a key, even when its slot's key moves while the run is in flight.
+  - Flow credentials are not yet read by package: the flow credential channel reads and writes by name. So a credential read for a flow of a name two packages hold (an http node's signing secret, an inbound hook's secret) is refused, naming the flow and its package, and never answered from another package's rows. A third-party `FlowCredentialSource` is asked for such a flow only when it declares `readsByPackage: true`.
+  - Stored rows are not byte-identical to before for a name one package holds: a paused run and a terminal history row now carry that package in `flow_package`, which earlier releases wrote as null and ignore when they read.
+  
+  **The activation ledger is addressed by `(package, name)` for flows** (`@objectstack/core`: `MetadataActivationStoreOptions.addressing`, `MetadataActivationWriteOptions.adoptPackageless`; the flow stores use `'package-and-name'`, every other type keeps `'name'`). Switching one package's flow writes that package's row and never re-attributes another package's row of the name.
+  
+  - A disable row that names no package, read while one package held the name, becomes that package's own row when a second package arrives after the boot's flow holders have sealed (`sealFlowHolders`, at `kernel:bootstrapped`). The second package's flow stays off until that write lands. If the write fails, both stay off and one warning says why. A second package that arrives during the boot (an installed package's `kernel:ready` rehydrate) binds nothing: which package arrived first is boot order, not the row's owner, so the row is read as below.
+  - A disable row that names no package, first read while two packages hold the name, keeps every package's flow of that name off that has no row of its own, with one warning. It is never bound to one of them later. To turn one on, switch that package's flow (`toggleFlowSlot`): that writes its own row.
+  - An environment-authored body over a name two packages hold overlays neither, with one warning. Where that body changed something security-relevant (for example it removed an approval step), each package's own body now runs instead.
+  
+  What narrows, and what an operator does about it:
+  
+  1. **A composition with no flow-name resolver.** Before this release, such a composition armed one holder of a two-holder name by precedence and ran it on its trigger and on a bare `execute`. Now the bare name is refused and neither slot is armed on a trigger, so that flow stops running from its trigger and from `execute`. Run it through `executeSlot(packageId, name)`, or attach the resolver (`AutomationServicePlugin` does, unconditionally). Measured: 0 first-party compositions lack it. The five that register `AutomationServicePlugin` (`os serve`, the verify harness, the runtime's app artifact handler, the data-migration kernel, and the examples through `requires: ['automation']`) each run on a kernel with the ObjectQL service, and the plugin attaches the resolver at `init()`.
+  2. **A credential save under a name two packages hold.** Before this release, such a save wrote and removed credential rows by name. Now a save or a publish that would write or remove a row of such a name is refused with `RESOURCE_CONFLICT`, naming both packages, and nothing is written: the save names no package, and every row of the name may be another package's credential. A save that writes and removes nothing still saves. Until the channel writes by package, change such a credential while one package holds the name.
+  
+  Declared limits, not narrowings: a rolling upgrade across a sealed clash (a replica on an earlier release ignores `flow_package` and, with a resolver attached, fails such a paused run as unresumable, never continuing it on the other package's flow; finish the upgrade before resuming it). In a run of a flow whose name two packages hold, `@objectstack/plugin-approvals` still reads its flow by name for a send-back, a batch sign-off's map item and the step labels, so those answer `RESOURCE_CONFLICT` (fail closed) until the trigger packages bind by slot. The runtime's bare `getFlow` readers (the flow dispatch status, the start admission, the `/automation` doors and the MCP action listing) answer the same for such a name until those doors take a package.
+  
+  Third-party `SuspendedRunStore` implementations that drop `flowPackage` make a paused run of a sealed-clash flow unresumable (it fails closed, never resumes on another package's flow). Third-party `FlowCredentialSource` implementations that do not declare `readsByPackage` are not asked for a sealed-clash flow's credentials: those reads are refused, naming the flow.
+  
+  `@objectstack/metadata-protocol` fix: a package's declared `.custom` override of its own flow is now honored whichever same-named shipper registered first. Before, it was judged against the first shipper only.
+  
+  New exports: `qualifiedFlowKey` and the `FlowSlot` type from `@objectstack/service-automation`; `MetadataActivationStoreOptions` and `MetadataActivationRowAddressing` from `@objectstack/core`. `FLOW_RUN_SLOT_KEY` (`Symbol.for('objectstack.automation.flowRunSlotKey')`) is a registry symbol and so readable from outside, though not exported. Widened signatures: `PackagedFlowSource` and `FlowCredentialSource` take an optional package, `FlowCredentialSource` gains an optional `readsByPackage`, `FlowCredentialChannel`'s constructor takes an optional shared-name reader, `SuspendedRun` and `RunRecord` gain an optional `flowPackage`, the stores' constructors take an optional `MetadataActivationStoreOptions`, and `AutomationEngine` gains `getRunFlow`, `flowKeyOfRun`, `flowActivationBinds`, `sealFlowHolders` and `packagedFlowSlotOwner`, and `FlowContender` and `FlowPrecedenceWinner` gain an optional `holder`.
+- 5a8dbc7: feat(security)!: an AI service account is the agent principal of its own requests, under the agent ceiling (ADR-0151 D3)
+  
+  Clause-②: no (narrowing) — every agent principal's permission sets are now read under the agent ceiling (no View All, no Modify All, no transfer, restore or purge, no system permission, no admin scope). The OAuth-connected assistant's first-party sets carry none of these bits, so only a deployment that edited its own agent set to carry one sees a narrower answer. No door, request or response shape, error code or status changes.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of a package root is removed or retyped. The narrowing reads only agent principals' permission sets at evaluation and refuses one class of assignment write; there is no stored shape for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** for an agent principal whose permission sets carry View All, Modify All, a destructive grant (transfer, restore, purge), a system permission or an admin scope. Measured first-party: 0 (none of the 3 OAuth agent ceiling sets carries any of these bits, and no AI service account row can exist until registration lands).
+  
+  - **Before.** An agent principal's sets were applied as written.
+  - **Now.** Those bits are cleared when the sets are read, and assigning such a set (or a position binding one) to an AI service account is refused by name.
+  - **The remedy.** Grant the agent the CRUD bits it needs on the objects it reads; a bypass bit or an administrative grant is a person's to hold.
+  
+  An AI service account (a `sys_user` row whose `principal_kind` is `agent`) now acts as itself. Its API key, on REST, on `/mcp` and over stdio, admits a context whose `userId` is the account, with `principalKind: 'agent'` and no `onBehalfOf`. Its own grants are its whole authority:
+  
+  - It does not receive the `everyone` anchor's permission sets or the member baseline. Its floor is the restricted agent set, so a new account can do nothing until it is granted something.
+  - It carries no system permission and is never a platform or organization administrator, whatever it holds: it never carries `admin_full_access` or an organization administrator set at all, so no reader that judges standing by a set's name (the approvals override and the `admin_rescue` slate among them) counts it.
+  - Every agent principal's permission sets are read under the agent ceiling: no View All, no Modify All, no transfer, restore or purge, no system permission and no admin scope. A set edited after it was assigned still grants nothing above the ceiling. The permission sets an OAuth-connected assistant receives carry none of these bits, so it is unchanged.
+  - Assigning an account a permission set, or a position whose sets, carry any of those bits is refused `400 VALIDATION_FAILED` (`invalid_value`), naming the set and what in it is above the ceiling.
+  
+  Flow runs, attachment and comment access checks, mention checks and the access explainer read the account as the agent it is. A person's sign-in, keys and grants are unchanged.
+  
+  Nothing registers an AI service account yet; the registration, key and lifecycle doors follow in a later change.
+- 74e85da: fix(service-automation): the boot log's flow name collision line says no flow is armed when the engine refuses the name
+  
+  Clause-②: no — log text only; what the engine arms, refuses or runs does not change.
+  Metadata-protocol: none
+  
+  When a second package ships a flow of the same name, the engine's package-scoped resolver refuses the bare name for a caller with no package, and `registerFlow` arms neither flow, naming both packages (ADR-0150 D3). The boot pull's collision warning still read "arming package 'FIRST' by package id", "arming package 'FIRST' because a managed package's flow is sealed" or "arming the declared override …", depending on which other definitions sat beside the two packages, and its log meta named an armed contender.
+  
+  The warning now asks the same resolver the engine asks. When it refuses the name, every such line reads "arming neither: the engine refuses this bare name for a caller with no package (ADR-0150 D3), so no definition dispatches; the 'failed to register flow' warning for 'NAME' names every holder. Rename one of them." ("arming none of them" for three or more definitions), and its meta carries `refused: true` and the contenders instead of `armed`/`shadowed`.
+  
+  A name the resolver serves keeps its line byte for byte, and so does every line when no resolver is attached. `resolveFlowPrecedence` takes the reader as an optional fifth argument (`FlowNameRefusalReader`, exported as a type); the automation plugin passes it.
+- b287761: fix(service-automation): a connector pull never creates a record whose match key is blank — the record is a row error, so the job run is `degraded`, not `success`
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A `job.pull` whose mapping writes in `upsert` mode used to create a pulled record that carries no value for the mapping's `upsertKey` as a NEW row with an empty key, and the run still said `success`. A source that renamed or dropped its id column therefore duplicated every changed record on each pull, and no later pull could match the copies again. The pull now hands the import runner `skipBlankMatchKey: true` and reports each such record as a failed row (`BLANK_MATCH_KEY`, the message naming the mapping and its `upsertKey`), with one warning per pull. A failed row makes the job's run outcome `degraded`, with the mapping and the counts as its reason. In `update` mode the same record used to be a silent skip; it is now the same row error.
+  
+  The import door (`POST /api/v1/data/:object/import`) is unchanged: there `skipBlankMatchKey` stays the caller's choice, and with it off an `upsert` still creates the blank-key row.
+- bf06a50: fix(lint, service-automation): `os validate` warns when a mapping's `connectorSource.connector` is not a declared rest or openapi connector, and a failed connector pull logs one `warn` line
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A mapping whose `connectorSource.connector` named a datasource, a connector of another provider, or nothing at all validated with no finding, and every scheduled pull then failed into the job run's `error` with nothing in the process log. `os validate`, `os lint` and `os build` now report `mapping-connector-source-unknown` (a warning; it says when the name is a datasource), and `@objectstack/lint` exports `validateMappingConnectorSources`, `MAPPING_CONNECTOR_SOURCE_UNKNOWN`, `CONNECTOR_SOURCE_PROVIDERS` and the `MappingConnectorSourceFinding` type. The connector pull (`pullConnectorSource`) logs `[Automation] connector pull of mapping "NAME" failed (REASON): …` at `warn` on every failed pull and rethrows the failure unchanged; the job run's `error` is written as before.
+- aad7d2f: fix(security): carry each permission set's package from the grant to the per-request evaluation
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  When two installed packages each ship a permission set of the same name, a request now gets the set its grant names and no other. The authorization resolver records the `(package, name)` each granted set resolved to on `ExecutionContext.permissionSetAddresses`, and the security plugin's evaluator reads every set through the security catalog at that address. It used to take the first set of the name the metadata list returned. A name that arrives with no address (an API key's seeded sets, an agent's scope ceiling, the baseline) resolves by ADR-0150 D3 with no caller: one holder answers as before, two or more are refused, naming every candidate once in the log, and nothing is granted.
+  
+  The activation ledger now switches a set off per holder, through its row's `package_id`: switching off one package's `sales_rep` leaves another package's `sales_rep` granting. A set the `everyone` anchor carries because a deployment accepted a package's suggestion resolves at the package the suggestion row names. The access explainer reports the same holders enforcement reads. Every context built by hand from the resolver's grants (objectql's scoped context, a `runAs: 'user'` flow run, storage, the audit mention gate and the organization-administrator check) carries the addresses with the names.
+  
+  A deployment where every set name has one holder sees no change.
+  
+  Two server-side exports gain a field and an option, and keep what they had. `readDisabledCatalogNames(...)` (`@objectstack/core`) adds `permissionSets`, its switched-off holders, asked with `permissionSetSwitchedOff(disabled, packageId, name)`; its `permissions` name set is unchanged. `PermissionEvaluator.resolvePermissionSets` adds `options.catalogLoader`, which takes `{ name, packageId? }` requests; called without it, the method reads the metadata list, the bootstrap sets and the by-name loader as before. Resolved sets come back in the order they did before.
+- 036a9fb: fix(objectql, rest, service-automation): a mapping name two packages hold is refused naming both, at `/meta`, the import door and the connector pull, instead of serving the first holder (ADR-0150 D3)
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no metadata shape, schema, stored row or registered node type changes: the change is which mapping a by-name read answers when two packages hold its name, the stored metadata is read exactly as before, so there is nothing for `objectstack migrate meta` to rewrite -->
+  
+  `mapping` is now one of the types whose by-name readers consult `(package, name)`. The import door's `mappingName` (`POST /api/v1/data/:object/import` and the async import job) and the connector pull (a job's `pull`) read the mapping naming no package, so they resolve it as a caller with no package: the environment's own mapping, else the one package that holds the name. One holder answers exactly as before, including a package's mapping imported into an object another package owns.
+  
+  **BREAKING** for answers that served one of two holders by registration order, now refused naming every holder (first-party count: 0; no example app or first-party package declares a mapping name another package declares):
+  
+  1. `GET /api/v1/meta/mapping/NAME` for a name two packages hold answered `200` with the first registered package's mapping. It is now `409 RESOURCE_CONFLICT` naming both.
+  2. An import by `mappingName` for such a name read the first holder's mapping: `200` when its target was the request's object, else `400 MAPPING_TARGET_MISMATCH` (the importer of the other package's object could never use its own mapping). It is now `409 RESOURCE_CONFLICT` naming both, and no row is written.
+  3. A connector pull of such a name pulled through the first holder's mapping, writing into that mapping's target. It is now refused before any call or write: the pull fails with `409 RESOURCE_CONFLICT` (reason `mapping_name_refused`) naming both, and the job run records that failure.
+  4. `GET /api/v1/meta/mapping/NAME?package=X`, `/meta/mapping/NS/NAME` and `/meta/mapping/_env/NAME`, where `X`, `NS` or the environment does not hold the name, answered `200` with the holder's mapping. They are now `409 RESOURCE_CONFLICT` naming the holder: the address is the exact qualifier (ADR-0150 D5), as it already is for apps, pages, dashboards, reports, books, analytics cubes, tools, skills, agents and APIs.
+  
+  The fix for each:
+  
+  - FROM a bare read of a two-holder name TO `?package=<id>` or `/meta/mapping/<namespace>/NAME`.
+  - FROM importing or pulling by a two-holder name TO renaming one of the two mappings; the import door does not yet take a package, and the pull does not yet read the `callerPackageId` its request carries.
+  - FROM an address naming a package that does not hold the name TO the holder the refusal names.
+  
+  **TypeScript:** `ConnectorPullRefusalReason` (`@objectstack/service-automation`) gains the member `mapping_name_refused`. A `switch` over the union that must be exhaustive needs a case for it; code that only reads `reason` is unaffected.
+- de141e3: fix(service-automation): a failed `http` node names the target host and the underlying cause
+  
+  A flow's `http` node that could not reach its target used to record only `http: fetch failed`, which hides whether DNS, a refused connection, a proxy or TLS failed. The step error now reads like `http: fetch failed — api.partner.test: ENOTFOUND getaddrinfo ENOTFOUND api.partner.test`: the host (never the path, query string or userinfo, which can carry a secret) and the cause code and message, capped at 200 characters. A url that carries a password no longer echoes it in the error. A timeout still reads `http: timeout after Nms`, and an HTTP error status still reads `HTTP <status>`.
+  
+  Clause-②: no
+  Metadata-protocol: none
+- fcb2122: fix(service-automation): a connector's failure text carries no credential part its metadata read withholds
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - **The rule.** A credential part the connector metadata read withholds never comes back in any other text the platform stores, serves or logs. A provider's failure text is rewritten by the connector redactor every metadata read runs (`getMetadataTypeRedactor('connector')`), the one judgement of what to withhold, where the text enters the platform.
+  - **Where it applies.** A provider factory's failure while an instance materializes (the instance's `degradedReason` in `GET /api/v1/automation/connectors` and the credential-reference listing, a `connector_action` refusal, a stored credential row's status reason, the degrade, hold and fail log records, a boot's failure), a handler's failure on a call (a flow run's step error, the pull door), and an upstream's refusal words on a call.
+  - **What a reader sees.** A stored URL appears as the metadata read serves it, its userinfo and credential query pairs removed; a URL a provider re-rendered is judged by the same read; a string the read withholds whole (a header or environment map value, an inline `auth` secret) reads `[credential withheld]`. A failure keeps its `code`, `status` and `name`.
+  - **Unchanged.** A text with no URL, and a URL with no credential part, read as the provider wrote them; a call's failure that holds nothing to withhold is the thrown value itself. The stored row is untouched, and the instance keeps using its stored URL.
+- Updated dependencies [31fe289]
+- Updated dependencies [7d0b47c]
+- Updated dependencies [9728ab1]
+- Updated dependencies [f6a429b]
+- Updated dependencies [eb96480]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [de24d17]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [abc7a94]
+- Updated dependencies [486b0a9]
+- Updated dependencies [9ed2ee1]
+- Updated dependencies [769adff]
+- Updated dependencies [e8dc483]
+- Updated dependencies [82142ed]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [3b8c724]
+- Updated dependencies [88cd0ab]
+- Updated dependencies [c23501b]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [5f47410]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [314ad95]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [771b2db]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [cd5f554]
+- Updated dependencies [f19fbb8]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [07685ae]
+- Updated dependencies [eee4149]
+- Updated dependencies [0f3ee58]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [13aa6a3]
+- Updated dependencies [391d748]
+- Updated dependencies [af3451b]
+- Updated dependencies [ddcdc80]
+- Updated dependencies [000e773]
+- Updated dependencies [7fc401f]
+- Updated dependencies [991d627]
+- Updated dependencies [4013e30]
+- Updated dependencies [3a27208]
+- Updated dependencies [29cbfcc]
+- Updated dependencies [343ddb2]
+- Updated dependencies [0c666c3]
+- Updated dependencies [f672e0d]
+- Updated dependencies [38717d3]
+- Updated dependencies [bfbdeec]
+- Updated dependencies [43faa22]
+- Updated dependencies [4adc890]
+- Updated dependencies [fdad178]
+- Updated dependencies [15f808a]
+- Updated dependencies [bcdf8d3]
+- Updated dependencies [ac890f5]
+- Updated dependencies [59bcd22]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [8fed00f]
+- Updated dependencies [8fed00f]
+- Updated dependencies [25fea77]
+- Updated dependencies [bd81a7a]
+- Updated dependencies [26f5719]
+- Updated dependencies [86ae2ca]
+- Updated dependencies [0837fdc]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [9afcd6a]
+- Updated dependencies [870ebce]
+- Updated dependencies [d1d90b7]
+- Updated dependencies [977be38]
+- Updated dependencies [2046d21]
+- Updated dependencies [243eba1]
+- Updated dependencies [740edc5]
+- Updated dependencies [778aedf]
+- Updated dependencies [71318af]
+- Updated dependencies [fd749a4]
+- Updated dependencies [a26abbc]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [6a8f415]
+- Updated dependencies [67d5d53]
+- Updated dependencies [47226e6]
+- Updated dependencies [a545a04]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [8fad7b1]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [a93ef3e]
+- Updated dependencies [0e4dfbe]
+- Updated dependencies [8cc709d]
+- Updated dependencies [b5765be]
+- Updated dependencies [8fa738f]
+- Updated dependencies [5a878a3]
+- Updated dependencies [60fe44f]
+- Updated dependencies [29702d5]
+- Updated dependencies [1aeeafd]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [26c2efd]
+- Updated dependencies [f7afab8]
+- Updated dependencies [7b80724]
+- Updated dependencies [2445cb4]
+- Updated dependencies [fb1ab89]
+- Updated dependencies [455b4f0]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [e8e924f]
+- Updated dependencies [590724f]
+- Updated dependencies [35cd64c]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [d5f3bc5]
+- Updated dependencies [e3948ae]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [1c5cee6]
+- Updated dependencies [aad1603]
+- Updated dependencies [0e4747a]
+- Updated dependencies [4bf6e8f]
+- Updated dependencies [eb68b98]
+- Updated dependencies [1ebe0c5]
+- Updated dependencies [2f05a46]
+- Updated dependencies [b126c13]
+- Updated dependencies [a11ef71]
+- Updated dependencies [deac7f4]
+- Updated dependencies [2ae3e30]
+- Updated dependencies [d8ed2e1]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [63de248]
+- Updated dependencies [a59d00a]
+- Updated dependencies [a2437b5]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [a91ad42]
+- Updated dependencies [49c8568]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [1030a80]
+- Updated dependencies [deabe3b]
+- Updated dependencies [55a00ba]
+- Updated dependencies [badf24d]
+- Updated dependencies [5268f50]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [e2bcd5c]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [adf6ee0]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [9052337]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [7569fb5]
+- Updated dependencies [bd5a443]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [4a3b186]
+- Updated dependencies [a2826a1]
+- Updated dependencies [2a6a28d]
+- Updated dependencies [902f162]
+- Updated dependencies [1ff9944]
+- Updated dependencies [c77dd17]
+- Updated dependencies [555eb1b]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [8847e09]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [78eb352]
+- Updated dependencies [2ce2646]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [6bd00d2]
+- Updated dependencies [6bd00d2]
+- Updated dependencies [b5696b4]
+- Updated dependencies [ea62933]
+- Updated dependencies [256a4b7]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [293a85b]
+- Updated dependencies [41dc302]
+- Updated dependencies [ed4b832]
+- Updated dependencies [d463b99]
+- Updated dependencies [30002df]
+- Updated dependencies [b065fad]
+- Updated dependencies [8c9260f]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [f6199a8]
+- Updated dependencies [f5e23e2]
+- Updated dependencies [6a01718]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [e11a575]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [9f61e06]
+- Updated dependencies [98583cd]
+- Updated dependencies [cadd6aa]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [d36d4ad]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [8ef2523]
+- Updated dependencies [c09ffc1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [e735425]
+- Updated dependencies [1f37085]
+- Updated dependencies [71d094c]
+- Updated dependencies [4363945]
+- Updated dependencies [8b16445]
+- Updated dependencies [6ee8c61]
+- Updated dependencies [2f369cd]
+- Updated dependencies [9b3c29d]
+- Updated dependencies [f4b4c8a]
+- Updated dependencies [6fcecb2]
+- Updated dependencies [db50231]
+- Updated dependencies [0e1311d]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [b6e6545]
+- Updated dependencies [90457e7]
+- Updated dependencies [ec29753]
+- Updated dependencies [1f30be1]
+- Updated dependencies [c6c2426]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [dced781]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [bafbc68]
+- Updated dependencies [0ebb080]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [529e535]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [59630d9]
+- Updated dependencies [fe88ecd]
+- Updated dependencies [5e85952]
+- Updated dependencies [ef4af73]
+- Updated dependencies [ae31539]
+- Updated dependencies [bdfed89]
+- Updated dependencies [7e697ff]
+- Updated dependencies [96b9350]
+- Updated dependencies [d9a232f]
+- Updated dependencies [d655caf]
+- Updated dependencies [1cd0e01]
+- Updated dependencies [3487ccc]
+- Updated dependencies [cc16008]
+- Updated dependencies [cfe3563]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [5b7269f]
+- Updated dependencies [2735ca4]
+- Updated dependencies [6dd196d]
+- Updated dependencies [d834a36]
+- Updated dependencies [0cd594b]
+- Updated dependencies [c62e72a]
+- Updated dependencies [450bfb6]
+- Updated dependencies [9046e02]
+- Updated dependencies [f647430]
+- Updated dependencies [36a8700]
+- Updated dependencies [69db709]
+- Updated dependencies [ad622d3]
+- Updated dependencies [31ae944]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [5a8dbc7]
+- Updated dependencies [c924627]
+- Updated dependencies [fb94249]
+- Updated dependencies [98ba756]
+- Updated dependencies [e627eaa]
+- Updated dependencies [7231dc7]
+- Updated dependencies [9253be4]
+- Updated dependencies [c8223fb]
+- Updated dependencies [4ed2092]
+- Updated dependencies [3224545]
+- Updated dependencies [8fca8f7]
+- Updated dependencies [26d30d7]
+- Updated dependencies [a15b544]
+- Updated dependencies [489f0ce]
+- Updated dependencies [3684d18]
+- Updated dependencies [d9f626b]
+- Updated dependencies [1a66fcf]
+- Updated dependencies [17606e4]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [f00fb1b]
+- Updated dependencies [b4acdb7]
+- Updated dependencies [c655af8]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [33ab84f]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [aad7d2f]
+- Updated dependencies [4f6fb53]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [45f0f81]
+- Updated dependencies [fa4cb68]
+- Updated dependencies [036a9fb]
+- Updated dependencies [fb71296]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [02498c9]
+- Updated dependencies [7aab601]
+- Updated dependencies [5c5f382]
+- Updated dependencies [3fc30d8]
+- Updated dependencies [e34723f]
+- Updated dependencies [9052363]
+- Updated dependencies [b6fc890]
+- Updated dependencies [38c528e]
+- Updated dependencies [b2f03a0]
+- Updated dependencies [2b11a71]
+- Updated dependencies [de6d893]
+- Updated dependencies [c147fc2]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [b58beb8]
+- Updated dependencies [5d4f2aa]
+- Updated dependencies [133f75a]
+- Updated dependencies [f4cd4ec]
+- Updated dependencies [b3d2f4b]
+- Updated dependencies [85c7374]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [7193160]
+- Updated dependencies [e1dac19]
+- Updated dependencies [3299873]
+- Updated dependencies [136eba4]
+- Updated dependencies [7b2bb66]
+- Updated dependencies [c92b887]
+- Updated dependencies [bb47215]
+- Updated dependencies [44a030b]
+- Updated dependencies [9020358]
+- Updated dependencies [713beba]
+- Updated dependencies [a794e32]
+- Updated dependencies [21510bb]
+- Updated dependencies [8304b08]
+- Updated dependencies [6dd2ca5]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [5210acf]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [bdbaf80]
+- Updated dependencies [a7293f7]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [bb67b98]
+- Updated dependencies [cad764d]
+- Updated dependencies [63a470a]
+- Updated dependencies [4851668]
+  - @objectstack/objectql@18.4.0
+  - @objectstack/spec@18.4.0
+  - @objectstack/plugin-auth@18.4.0
+  - @objectstack/platform-objects@18.4.0
+  - @objectstack/core@18.4.0
+  - @objectstack/metadata-protocol@18.4.0
+  - @objectstack/metadata-core@18.4.0
+  - @objectstack/formula@18.4.0
+  - @objectstack/types@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes
