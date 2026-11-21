@@ -1,5 +1,341 @@
 # @object-ui/react
 
+## 18.4.0
+
+### Patch Changes
+
+- 8fefefd: refactor(react)!: retire twenty zero-consumer exports, and delete the two motion hooks, two helpers and one type nothing reads
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (runtime-export-retired @object-ui/react#formatUnresolvableVisibilityMessage, @object-ui/react#evaluateConfigBagInScope, @object-ui/react#useHasPageVariables, @object-ui/react#getShortcutDescriptions, @object-ui/react#useReducedMotion, @object-ui/react#AnimationTriggerType, @object-ui/react#SUPPORTED_TRANSITION_PRESETS, @object-ui/react#SUPPORTED_EASING_FUNCTIONS, @object-ui/react#useViewTransition, @object-ui/react#ViewTransitionConfig, @object-ui/react#ViewTransitionResult, @object-ui/react#useOptionalTheme, @object-ui/react#resolveNotificationPresentation, @object-ui/react#SUPPORTED_NOTIFICATION_DISPLAY_TYPES, @object-ui/react#SUPPORTED_NOTIFICATION_POSITIONS, @object-ui/react#SUPPORTED_NOTIFICATION_ACTION_VARIANTS, @object-ui/react#HostMapStyleContext, @object-ui/react#RecordPagePreferencesContext, @object-ui/react#PrintPageContext, @object-ui/react#NoDataSourcePanel) the retired operands are four React hooks, a shortcut-description helper, three raw context objects, a diagnostic formatter, a config-bag evaluator, a fallback panel component, five supported-value sets, one presentation resolver, two hook interfaces and one string-union type; nothing in the workspace or in hotcrm imports any of them from the package entry, and no packages/spec schema, registered node type, conversion surface or stored shape names them, so there is nothing for `objectstack migrate meta` to rewrite -->
+  
+  **BREAKING** for a host that imports any of these twenty names from `@object-ui/react`. None had an importer anywhere in the workspace or in hotcrm, so the Console and every `@object-ui/*` package are unaffected.
+  
+  Seven of them are **gone from the package, not only from the entry**, because nothing inside the package read them either: the `hooks/useReducedMotion.ts` module (`useReducedMotion`) and the `hooks/useViewTransition.ts` module (`useViewTransition`, `ViewTransitionConfig`, `ViewTransitionResult`) are deleted, and the functions `useHasPageVariables` and `getShortcutDescriptions` and the type `AnimationTriggerType` are deleted from their modules.
+  
+  The other thirteen stay in their modules for the code that reads them and only leave the entry: `formatUnresolvableVisibilityMessage` (the visibility reporter still formats with it), `evaluateConfigBagInScope` (`useConfigBagEvaluator` still calls it), `SUPPORTED_TRANSITION_PRESETS` / `SUPPORTED_EASING_FUNCTIONS` and the three `SUPPORTED_NOTIFICATION_*` sets (the spec-parity tests still hold them against the spec vocabularies, and `resolveNotificationPosition` still checks positions against its set), `useOptionalTheme`, `resolveNotificationPresentation` (`NotificationProvider` still calls it), the raw `HostMapStyleContext` / `RecordPagePreferencesContext` / `PrintPageContext` objects, and `NoDataSourcePanel` (`ElementDataSourceGate` still renders it). Every other name the entry exported stays exported unchanged, among them `reportUnresolvableVisibilityPredicate`, `UNRESOLVABLE_VISIBILITY_PREFIX`, `UNRESOLVABLE_ENABLEMENT_PREFIX`, `useAnimation`, `useTheme`, `useNotifications`, `NotificationProvider`, the `HostMapStyleProvider` / `RecordPagePreferencesProvider` / `PrintPageProvider` providers with their `useHostMapStyle` / `useRecordPagePreferences` / `usePrintPage` hooks, `usePageVariables`, `useKeyboardShortcuts` and `ElementDataSourceGate`.
+  
+  What leaves, and what to write instead:
+  
+  - FROM `useReducedMotion` TO `window.matchMedia('(prefers-reduced-motion: reduce)')` in your own hook; the package no longer carries one.
+  - FROM `useViewTransition`, `ViewTransitionConfig`, `ViewTransitionResult` TO `document.startViewTransition` called directly; the package no longer carries a wrapper.
+  - FROM `useHasPageVariables` TO `usePageVariables()`, which answers a frozen empty value outside a `PageVariablesProvider`.
+  - FROM `getShortcutDescriptions` TO a local map over your `KeyboardShortcutDefinition[]` (filter on `description` and `enabled !== false`).
+  - FROM `AnimationTriggerType` TO a local string union: no function in the package takes it.
+  - FROM `formatUnresolvableVisibilityMessage` TO `reportUnresolvableVisibilityPredicate`, which formats and reports in one call; filter its lines by `UNRESOLVABLE_VISIBILITY_PREFIX` / `UNRESOLVABLE_ENABLEMENT_PREFIX`.
+  - FROM `evaluateConfigBagInScope` TO `SchemaRenderer`, which evaluates a node's config bag itself.
+  - FROM `SUPPORTED_TRANSITION_PRESETS`, `SUPPORTED_EASING_FUNCTIONS` TO the `TransitionPresetType` / `EasingPreset` types, or the spec's `TransitionPresetSchema` / `EasingFunctionSchema` for a runtime list.
+  - FROM `useOptionalTheme` TO `useTheme` inside a `ThemeProvider`.
+  - FROM `resolveNotificationPresentation` TO `useNotificationsByPresentation(presentation)`, which returns the notifications a surface of that presentation renders.
+  - FROM `SUPPORTED_NOTIFICATION_DISPLAY_TYPES`, `SUPPORTED_NOTIFICATION_POSITIONS`, `SUPPORTED_NOTIFICATION_ACTION_VARIANTS` TO the `NotificationDisplayType` / `NotificationPositionValue` / `NotificationActionVariant` types, or `resolveNotificationPosition` to normalize a position.
+  - FROM `HostMapStyleContext`, `RecordPagePreferencesContext`, `PrintPageContext` TO their providers (`HostMapStyleProvider`, `RecordPagePreferencesProvider`, `PrintPageProvider`) and hooks (`useHostMapStyle`, `useRecordPagePreferences`, `usePrintPage`).
+  - FROM `NoDataSourcePanel` TO `ElementDataSourceGate`, which renders it when no data source resolves, or `noDataSourceMessage` for the text.
+- a91409c: fix(core,react,i18n,components,app-shell,console): a write refused because the object's external datasource does not accept writes says the table is read-only, not "you don't have permission"
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **`@object-ui/core`: `isExternalWriteRefusal(err)`**, re-exported from `@object-ui/react` beside the other write-refusal readers. True when the server refused a write with `EXTERNAL_WRITE_FORBIDDEN`, the ADR-0015 write gate's code for an object bound to an external datasource that does not admit writes (`datasource.external.allowWrites` and `object.external.writable` must both be true). Read from `code`, then `details.code`, like `isPermissionError`. The refusal is a 403, so `isPermissionError` answers true for it too: a caller asks this first.
+  - **`@object-ui/i18n`: `form.readOnlyExternalSource`**, in all ten packs: "This table is read-only. Its records come from an external data source that does not accept changes."
+  - **Every surface that met this refusal now says the table is read-only:** the console record form page and the record dialog (`@object-ui/components` form), which said "you don't have permission to save this record"; the record page delete, the list row delete and the record page inline edit, which showed the gate's raw diagnostic; and the calendar's drag-to-reschedule and the record path's stage change. A permission line sent an administrator through permission sets for a grant that cannot exist.
+- 7b2e557: fix(drill): "Open in list" from a dashboard or report drill is offered only when the list can show exactly the drawer's records
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  A drill filter is the clicked bucket AND the widget's filter AND the measure's drill scope. The list route holds one value per filter param and has no spelling for `$in`, so a drill with two conditions on one field (a `status = sent` bucket under a `status = paid` measure scope) or an `$in` scope opened a wider list than the drawer: the drawer showed 0 invoices and the list showed every sent one. The Console now offers "Open in list", and follows `drillDown.target: 'navigate'`, only when the route can write every condition of the drill filter, after resolving its placeholders; otherwise the drill stays in the drawer. A plain equality or date-range drill opens the same URL as before.
+  
+  `DrillNavigationValue` (`@object-ui/react`) gains an optional `canOpenRecordList(objectName, filter)`. The drill drawers (`DrillDownDrawer`, `OpenInListButton`, `ObjectChart`) offer the escape hatch only when `openRecordList` is present and `canOpenRecordList` is absent or answers `true`. A host that does not provide it behaves exactly as before.
+- 52ffd5a: feat(ui): a page element bound to an `api` data source reads again after an action on the same page succeeds
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **`@object-ui/app-shell`: the page's action refresh reaches its `api`-bound elements.** After a successful `api`, `flow` or `script` action on a page, the page still declares `'*'` on the data-invalidation bus, and then asks its own `api`-bound elements to read again. Before, those elements kept the answer they read when the page opened, so a row's "Turn off" button changed the server and left the page showing the old state. A failed action, a cancelled confirmation or param dialog, and `refreshAfter: false` read nothing, as they refresh nothing today.
+  - **`@object-ui/react`: `ElementApiRereadScope` and `createElementApiReread()`.** A host mounts the scope around a page with a signal and calls its `reread()` after that page's action succeeds; every `api`-bound element below reads again, and none outside it does. A change declared on the bus alone re-reads nothing, because an endpoint names no object and that change comes from every surface of the app. While the new read is in flight the element keeps its last answer on screen, with no loading panel, so a row button in the middle of its own run stays mounted. The new answer replaces it in place. A failed re-read draws the binding's error face, never the answer from before the write. A read asked after `reread()` never joins, and is never handed out from the console's open, a request asked before it.
+  
+  Every page element carrying `dataSource: { provider: 'api' }` gets this through `SchemaRenderer`, including the product blocks (`hero`, `stat`, `usage-bar`, `checklist`, `tile-grid`, `row-table`). Navigation `visible` gates that read an `api` binding are outside the page and do not read again. No `@objectstack/spec` change: `refreshAfter` already decides whether an action refreshes.
+- Updated dependencies [d0512c2]
+- Updated dependencies [4261169]
+- Updated dependencies [b5fd350]
+- Updated dependencies [ac5d0ce]
+- Updated dependencies [2cf269f]
+- Updated dependencies [604a2b3]
+- Updated dependencies [e396095]
+- Updated dependencies [f810c34]
+- Updated dependencies [7a5f73e]
+- Updated dependencies [2e33533]
+- Updated dependencies [2a32bd4]
+- Updated dependencies [ba875d2]
+- Updated dependencies [bb61872]
+- Updated dependencies [4211f50]
+- Updated dependencies [a1d243e]
+- Updated dependencies [7d0b47c]
+- Updated dependencies [9728ab1]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [1e6f542]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [b379262]
+- Updated dependencies [7945a3b]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [c2be734]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [9049be2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [af3451b]
+- Updated dependencies [3a27208]
+- Updated dependencies [f0ad1f7]
+- Updated dependencies [03be565]
+- Updated dependencies [7e9fa4b]
+- Updated dependencies [bc8945f]
+- Updated dependencies [42afac7]
+- Updated dependencies [0c666c3]
+- Updated dependencies [38717d3]
+- Updated dependencies [a9fb14b]
+- Updated dependencies [6f095b9]
+- Updated dependencies [ac890f5]
+- Updated dependencies [5f80129]
+- Updated dependencies [0c7e95a]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [c8e6d38]
+- Updated dependencies [d99cd3b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [b6caa14]
+- Updated dependencies [a77c2e9]
+- Updated dependencies [25fea77]
+- Updated dependencies [ea5807e]
+- Updated dependencies [d3f23d2]
+- Updated dependencies [ff12aed]
+- Updated dependencies [6c48d48]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bff5ba2]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [31260ca]
+- Updated dependencies [ef2ad31]
+- Updated dependencies [2046d21]
+- Updated dependencies [18870c9]
+- Updated dependencies [243eba1]
+- Updated dependencies [fa9c0aa]
+- Updated dependencies [fd749a4]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [6a8f415]
+- Updated dependencies [56cac5e]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [648089d]
+- Updated dependencies [10ecafd]
+- Updated dependencies [b6f4c0e]
+- Updated dependencies [b4f4781]
+- Updated dependencies [042efb7]
+- Updated dependencies [48231b0]
+- Updated dependencies [0d54279]
+- Updated dependencies [8e5fabe]
+- Updated dependencies [ac56acf]
+- Updated dependencies [a91409c]
+- Updated dependencies [ab12a3b]
+- Updated dependencies [2b35374]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [7b10a30]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [590724f]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [aad1603]
+- Updated dependencies [ad2393f]
+- Updated dependencies [5bca14f]
+- Updated dependencies [a058413]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [062236c]
+- Updated dependencies [a59d00a]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [d996c38]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [47c457b]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [5268f50]
+- Updated dependencies [5268f50]
+- Updated dependencies [115a43a]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [c1da957]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [c77dd17]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [b631573]
+- Updated dependencies [78d4fe9]
+- Updated dependencies [78eb352]
+- Updated dependencies [a0b40f2]
+- Updated dependencies [6ddf827]
+- Updated dependencies [d9d3eb7]
+- Updated dependencies [2ce2646]
+- Updated dependencies [bd1b768]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [0f920b9]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [ed4b832]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [1c66988]
+- Updated dependencies [584f7b8]
+- Updated dependencies [065bba7]
+- Updated dependencies [d8d0791]
+- Updated dependencies [66b17a3]
+- Updated dependencies [f5e23e2]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [3f61e4f]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [51992df]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [1f37085]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [9a63ecb]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [eff90af]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [ce965cf]
+- Updated dependencies [f88ca70]
+- Updated dependencies [f67f3b3]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [1ff1d45]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2c6b936]
+- Updated dependencies [46ec2ec]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [ef4af73]
+- Updated dependencies [7e697ff]
+- Updated dependencies [d9a232f]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [0cd594b]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [e627eaa]
+- Updated dependencies [6be71ab]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [26d30d7]
+- Updated dependencies [3684d18]
+- Updated dependencies [3684d18]
+- Updated dependencies [ac8fede]
+- Updated dependencies [60996d4]
+- Updated dependencies [2715a09]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [f6b8985]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [94019a6]
+- Updated dependencies [60f8149]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [49bc3be]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [cc8c4b0]
+- Updated dependencies [de6d893]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [133f75a]
+- Updated dependencies [f84205b]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [614e831]
+- Updated dependencies [e1dac19]
+- Updated dependencies [136eba4]
+- Updated dependencies [44a030b]
+- Updated dependencies [21510bb]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [63a470a]
+- Updated dependencies [b463ec6]
+  - @object-ui/core@18.4.0
+  - @object-ui/types@18.4.0
+  - @object-ui/i18n@18.4.0
+  - @objectstack/spec@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes
