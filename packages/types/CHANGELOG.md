@@ -1,5 +1,257 @@
 # @objectstack/types
 
+## 18.4.0
+
+### Patch Changes
+
+- 293a85b: feat(cli): `os serve` seals secrets with the crypto provider a plugin registers, so a KMS- or Vault-backed provider can hold the keys
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  A plugin supplies the host's secret crypto provider by registering an `ICryptoProvider` as the kernel service `crypto-provider` — `CRYPTO_PROVIDER_SERVICE`, new in `@objectstack/types` — with `ctx.registerService` in its `init()`, and declaring it in `providesServices`. `os serve` then hands that one provider to everything that seals a `sys_secret` row: the data engine (secret fields), the datasource secret binder (datasource credentials) and the default settings service (encrypted settings). Before, `os serve` built `LocalCryptoProvider` itself after every plugin hook and overwrote whatever a plugin had set.
+  
+  Without a registration nothing changes: the host keeps `LocalCryptoProvider`, keyed off `OS_SECRET_KEY` or the persisted key file exactly as before, and a production boot without a stable key still refuses at `kernel:ready` with the same message. The one difference is that the default settings service now shares that local provider instead of building a second one from the same key source; what either sealed, the other opens.
+  
+  The provider holds every secret's key, so the boot refuses rather than guess:
+  
+  - two plugins that both declare `providesServices: ['crypto-provider']` refuse before either initializes, both named (an undeclared second `registerService` is refused by the kernel, naming the service);
+  - a provider registered after plugin init, or the registered one replaced, refuses once the boot is up;
+  - a value registered under the name that is not an `ICryptoProvider` refuses, naming the missing methods;
+  - a secret sealed or opened while plugins are still initializing is refused, never sealed by a provider the boot has not chosen yet.
+  
+  No refusal prints a registered value.
+- f4b4c8a: fix(mcp): `run_action` and `resume_run` answer a thrown error the way `POST /api/v1/actions` does, through that door's one reader
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  MCP `run_action` and `resume_run` answered an error thrown while running an action differently from `POST /api/v1/actions/:object/:action`, which runs the same action:
+  
+  | The action threw | MCP answered | `/actions` answers, and MCP now answers |
+  | --- | --- | --- |
+  | A sandboxed body's own `throw new Error('Not enough leave')` | the runner's wrapper as bare text, naming the body: `action 'NAME' threw: Error: Not enough leave` | `400`, `HOOK_ABORTED`, `Not enough leave` |
+  | A plain `Error` | its bare text, no code | `400`, `VALIDATION_ERROR`, its own sentence |
+  | A driver error with a string code (`SQLITE_BUSY`) | `{ code: 'SQLITE_BUSY', message }`, no status | `400`, `VALIDATION_ERROR`, `declaredCode: 'SQLITE_BUSY'` |
+  | A sandboxed body that crashed (`TypeError`), with or without a declared code | the wrapper with the native error text | `500`, `INTERNAL_ERROR`, `Internal server error` |
+  
+  The tool error is `{ "error": { "code", "message", "status" } }` with `isError`, plus `declaredCode` and `userMessage` when the door serves them. The full wrapper and the fault line are logged on the server, as the door logs them. A refusal with a registered code (a body that throws `{ code: 'RECORD_LOCKED', status: 409 }`) keeps its code, its own sentence and its status. A refusal with an app's own unregistered code (`{ code: 'LEAVE_EXHAUSTED', status: 409 }`) now crosses as `/actions` serves it: the closed code its status derives (`RESOURCE_CONFLICT`), with `declaredCode: 'LEAVE_EXHAUSTED'` beside it; MCP used to answer `code: 'LEAVE_EXHAUSTED'`. A thrown `details` (the confirmation gate's) still rides on a refusal and is no longer served on a fault (status 500 and above), which answers only the door's sanitised envelope; the `PERMISSION_DENIED` withhold is unchanged. This supersedes the line in the `31218` changeset that says `run_action` and `resume_run` are unchanged.
+  
+  A driver string code answers what `/actions` answers. `/api/v1/data` answers the same throw `500 DATABASE_ERROR`; that difference between the two REST doors is not changed here.
+  
+  **New export (`@objectstack/types`): `actionsDoorAnswerOf(err, objectName?)` and its `ActionsDoorAnswer` type**, the `/api/v1/actions` door's answer to a thrown value, beside `mapDataError` (the `/api/v1/data` door's). The `/actions` door (`@objectstack/runtime`) now answers through it; its responses are unchanged byte for byte.
+- db50231: fix(types): `POST /api/v1/actions` answers a driver error carrying a string code the way `/api/v1/data` does, as a server fault
+  
+  Clause-②: no (a status and code correction on an error answer: a driver fault inside an action body moves from a 400 refusal to the 5xx fault `/data` already answers; no accepted input and no success shape changes)
+  Metadata-protocol: none
+  
+  An action body that hit a driver error carrying its own string code (`SQLITE_BUSY`, `ECONNREFUSED`, `57P01`) and no HTTP status was answered by `POST /api/v1/actions/:object/:action` as a client refusal: `400 VALIDATION_ERROR`, the driver's text as the message, and the driver's code in `declaredCode`. `/api/v1/data` answers the same throw as a server fault. The MCP `run_action` and `resume_run` tools answer what `/actions` answers, so they moved with it.
+  
+  | The action threw | `/actions` answered | `/actions` and `/data` now answer |
+  | --- | --- | --- |
+  | `{ code: 'SQLITE_BUSY', message: 'SQLITE_BUSY: database is locked' }` | `400`, `VALIDATION_ERROR`, the driver text, `declaredCode: 'SQLITE_BUSY'` | `500`, `DATABASE_ERROR`, `Internal data error` |
+  | `{ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:5432' }` | `400`, `VALIDATION_ERROR`, the driver text, `declaredCode: 'ECONNREFUSED'` | `500`, `INTERNAL_ERROR`, `Internal server error` |
+  
+  The driver's code and text are logged on the server instead, as a `driver fault` line.
+  
+  - **Which throws move.** A throw that declared no status and whose `code` is not a closed ADR-0112 code, and only when the `/data` door's classifier (`mapDataError`) answers it as a server fault. `actionsDoorAnswerOf` (`@objectstack/types`) asks that classifier for this case; it holds no copy of its reading.
+  - **Unchanged.** A closed code with no status (`RECORD_LOCKED`, `PERMISSION_DENIED`) is still the `400` refusal with that code. A bare `Error` is still `400 VALIDATION_ERROR` with its own sentence. A throw that declared its status keeps it, and an unregistered code beside it still rides `declaredCode`. A sandboxed action body's coded refusal (`code: 'CREDIT_LIMIT'` with no status) is still the `400` refusal with `declaredCode`, which is what `/data` answers for it.
+  - **Stated cost.** An in-process action handler that throws its own unregistered code with no status, which `/data` also answers as a fault, now gets the fault answer here too and loses the code (the 2026-08-27 ruling on #12509: the discriminator is the status channel). It keeps its code by declaring the status it means.
+  
+  This supersedes the line in the `31271` changeset that says a driver string code answers `400 VALIDATION_ERROR` with `declaredCode` at `/actions` and that the difference from `/data` is not changed.
+- 0e1311d: refactor(runtime): the dispatcher answers a thrown value through the one composition the `/actions` door reads
+  
+  Clause-②: no (fold onto one composition, no wire change)
+  Metadata-protocol: none
+  
+  `HttpDispatcher.errorFromThrown` (`@objectstack/runtime`), the exit every dispatcher domain answers a thrown value through, composed its answer term by term beside the `/api/v1/actions` door's reader (`actionsDoorAnswerOf`, `@objectstack/types`): the resolver's closed `code`, the engine duplicate's wire spelling and context, the demoted `declaredCode`, the declared `userMessage`, and the 5xx leak withhold. The two agreed, and nothing tied them. Both now build their answer from one function, so a change to it moves every door that answers a throw this way.
+  
+  **New export (`@objectstack/types`): `thrownAnswerOf(err, fallbackStatus)` and its `ThrownAnswer` type**, the runtime dispatcher's answer to a thrown value at a fallback status: `status`, `code`, `message`, and `declaredCode`, `userMessage`, `details` when present. `actionsDoorAnswerOf`'s declared-status and rejection arms return it with the door's operator lines.
+  
+  No response changes: the dispatcher's existing envelope pins pass unedited.
+- b6e6545: feat(runtime): package jobs honour the host's per-kernel `scheduledWorkPolicy`
+  
+  Clause-②: yes — an optional `scheduledWorkPolicy` member on `AppPlugin`'s options and on `AppArtifactJobSchedulingOptions` (both exported from the `@objectstack/runtime` entry), and `ScheduledWorkPolicySource` / `readScheduledWorkPolicy` newly exported by `@objectstack/types`, widen published surfaces; nothing narrows.
+  Metadata-protocol: none
+  
+  A host that runs many kernels in one process can turn package-authored scheduled work off for one kernel by handing it a `scheduledWorkPolicy`. The automation engine and both schedule triggers have taken it since the per-kernel policy landed, but a package's `jobs` did not: `scheduleAppArtifactJobs` read only the deployment switch `OS_AUTOMATION_SCHEDULED_WORK_ENABLED`, so on a kernel whose host turned scheduled work off, the `schedule` flows stayed unarmed while the same package's jobs kept running.
+  
+  - `AppPlugin` takes an optional `scheduledWorkPolicy` in its third constructor argument and hands it to the jobs binder on `kernel:ready`.
+  - `AppArtifactJobSchedulingOptions` takes the same optional `scheduledWorkPolicy`, a value or a resolver. When it is present, `scheduleAppArtifactJobs` reads it once per call in place of both deployment reads: `enabled` gates the call, and `requiresActingOrganization` / `runOwnership` decide whether each job must declare its `organization`.
+  - When that policy is off, nothing is scheduled, the result is `withheld: 'scheduled-work-disabled'`, the jobs the app scheduled before are cancelled, and the info line carries the host's own `hostDisabledReason` when it gave one, instead of the sentence that tells the reader to set the environment variable.
+  - A resolver that throws fails closed: nothing is scheduled, the app's earlier jobs are cancelled, the result is `withheld: 'scheduled-work-policy-unreadable'`, and the reason is logged at `error`.
+  - When no policy is handed, the deployment switch decides, exactly as before.
+  
+  Give the kernel's engine, its schedule triggers and its `AppPlugin` the same policy.
+  
+  `ScheduledWorkPolicySource` and `readScheduledWorkPolicy` now live in `@objectstack/types` beside `ScheduledWorkPolicy`, so every binder spells the source type once. `@objectstack/trigger-schedule` re-exports `ScheduledWorkPolicySource` under the same name, so existing imports keep working.
+- Updated dependencies [7d0b47c]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [af3451b]
+- Updated dependencies [3a27208]
+- Updated dependencies [0c666c3]
+- Updated dependencies [38717d3]
+- Updated dependencies [ac890f5]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [25fea77]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [2046d21]
+- Updated dependencies [243eba1]
+- Updated dependencies [fd749a4]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [590724f]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [aad1603]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [a59d00a]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [5268f50]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [c77dd17]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [ed4b832]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [ef4af73]
+- Updated dependencies [7e697ff]
+- Updated dependencies [d9a232f]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [0cd594b]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [e627eaa]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [26d30d7]
+- Updated dependencies [3684d18]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [de6d893]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [133f75a]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [e1dac19]
+- Updated dependencies [44a030b]
+- Updated dependencies [21510bb]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [63a470a]
+  - @objectstack/spec@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes

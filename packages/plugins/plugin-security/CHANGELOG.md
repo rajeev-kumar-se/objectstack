@@ -1,5 +1,843 @@
 # @objectstack/plugin-security
 
+## 18.4.0
+
+### Minor Changes
+
+- 6106b73: feat(spec, security): a `controlled_by_parent` object may declare an optional master, and a detail row with no master is read by its owner
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  Skills-docs: follow-up owed — #30907 (card 3/3 of the ruling: the docs and skills that teach `controlled_by_parent` still say the master is always required); this diff teaches the optional master in ADR-0055 §1 and §2 as amended, in `os explain relationship/master-detail-required` and `os explain security-controlled-by-parent-no-relation`, and in the semantic migration entry `cbp-optional-master-admitted`
+  
+  A rule like "a rep sees the contacts of the accounts they own; a contact need not have an account" now has a declarative form. Declare the detail's only `master_detail` with `required: false`:
+  
+  ```ts
+  fields: {
+    account: Field.masterDetail('crm_account', { label: 'Account', required: false }),
+  },
+  sharingModel: 'controlled_by_parent',
+  ```
+  
+  - **`@objectstack/spec`: the optional master.** A `controlled_by_parent` object whose only `master_detail` is declared `required: false` passes the parse and `ObjectSchema.create()` with that value kept. `controlledByParentMasterOf(fields)` is exported from `@objectstack/spec/data` beside `controlledByParentMasterRefusal`: it answers the one master's field and whether it is optional. `isControlledByParentMasterField` still means the required master. Every other refusal stands: two masters, a required `lookup` only, and a `readonly` or `system` master. `ObjectSchema.create()` still forces an omitted `required` to `true`, and still refuses `required: false` on a `master_detail` beside another one. A stored row the v18 upgrade listed because its master declared `required: false` is valid now and no longer listed (`os migrate meta`); the semantic entry `cbp-optional-master-admitted` records it. The raw parse reads an omitted `required` as `false` and so admits it as the optional master; `os lint` reports the omission (below).
+  - **`@objectstack/plugin-security`: the null-master read arm.** For an optional master, the controlled-by-parent read filter is the unchanged master arm OR a second arm for rows whose master reference is empty: every such row for a holder of View All on the detail, else the caller's own (`owner_id`), else none (an object without an `owner_id` column). A row with no owner (a queue row) is View All's alone. The two arms never share a row, and View All on the detail does not open the master arm. Every read door composes the one filter, so the data API, analytics, search, export, the parent gates of attachments, comments, activity and approvals, chains and delegated reads follow. A required master's filter is unchanged. `security/explain` names the null-master arm on a record read. Writes are unchanged: an insert or update that leaves the master reference empty is still refused with 422.
+  - **`@objectstack/lint`.** `relationship/master-detail-required` passes the optional master, still reports `readonly` / `system` on it, and reports an omitted `required` on the only `master_detail` at `error`, naming both spellings (`required: true`, or `required: false` for an optional master). `security-controlled-by-parent-no-relation` and `-ambiguous-relation` resolve the optional master as the parse does.
+  - **`@objectstack/objectql`.** The boot refusal of a master the engine cannot compose a read over now judges an optional master's detail too.
+- 0373715: feat(security, verify): the `controlled_by_parent` write gate judges a detail row whose optional master is empty — its owner or Modify All on the detail writes it
+  
+  Clause-②: yes
+  Metadata-protocol: semantic
+  Skills-docs: follow-up #30907
+  
+  A `controlled_by_parent` object whose only `master_detail` is declared `required: false` (an optional master) could already be declared, and its rows that name no master were already read by their owner and by View All on the detail. Writing such a row was refused with `422 MISSING_REQUIRED_FIELD`. It is now judged:
+  
+  - **Create.** An insert that names no master is admitted to anyone the detail's own `create` grant admits, and its creator becomes its owner. A batch is admitted the same way; every master its rows do name is still asked.
+  - **Update and delete.** A stored row that names no master is written by its owner (`owner_id` equal to the caller) and by a holder of `modifyAllRecords` on the detail, and refused `403 PERMISSION_DENIED` for everyone else, a holder of View All included. A row with no owner (a queue row), and every row of an object with no `owner_id` column, is Modify All's alone. The same rule judges each row a predicate update or delete (`multi: true`) selects, both principals of an on-behalf-of write, and `ISecurityService.checkControlledByParentWrite` (a refusal there is `deny` on the `master_chain` leg).
+  - **Setting a master** (none → M, M1 → M2) asks edit on the master the body names, as before. **Emptying one** (M → none) asks edit on the master the row leaves: the `sharing.controlledByParent.ownerMayEdit` opt-in, which lets an owner update a row with read on its master, does not cover a body that empties the master, so an owner who only reads the account cannot detach a contact and make it private.
+  - **Chains.** A master that is itself `controlled_by_parent` with an optional master of its own, and names none, ends the chain: writing its details asks the same rule of that row (its owner, or Modify All on its object).
+  - Ownership transfer is unchanged: a body that names another owner is still gated by `allowTransfer`.
+  - **`@objectstack/verify`.** The parent write reach family proves an optional-master detail in both cases: its records under a master, as every detail, and its records that name none, by the rule above (`ParentWriteReachReach.masters: 'none'`, with `masterRead: 'none'` and `unreadableDetails`).
+  
+  A required master is unchanged: a row whose stored required master is empty still answers `422 MISSING_REQUIRED_FIELD`.
+- 3c1eb63: feat(spec,lint,plugin-security): a membership key may yield the caller's own roster rows (`valueField: 'id'`)
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  
+  A declared membership key (`ObjectSchema.membershipKeys`) may now name `id`, the roster object's own primary key, as its `valueField`. `current_user.KEY` is then the ids of the signed-in user's own rows of that object, "the records I am". This covers the apps where the person is a record: an HR `employee`, a service-desk `agent`, a portal `customer`.
+  
+  ```ts
+  // on the employee roster object
+  membershipKeys: {
+    my_employee_ids: { userField: 'user', valueField: 'id' },
+  }
+  // in a permission set
+  rowLevelSecurity: [
+    { name: 'own_leave', object: 'hr_leave_request', operation: 'select', using: 'employee in current_user.my_employee_ids' },
+  ]
+  ```
+  
+  The key yields only rows whose `userField` is the caller, so it grants nothing by itself. What a policy grants with it is the author's choice, as for any other key.
+  
+  - `os validate`, `os build`, `os lint` and the server's save gate no longer refuse `valueField: 'id'` with `membership-key-value-field-invalid`. They still refuse any other column that is not a `lookup`, `master_detail` or `user` reference. `id` is still no user reference as `userField`.
+  - `rls-predicate-membership-key-target` treats such a key as holding ids of the roster object itself. A policy may compare it with a column that references the roster, or with the roster's own `id`. A comparison with a column of another object, a non-reference column, or another object's `id` is refused as before.
+  - The security plugin's roster read projects `id` once for such a key. The set is de-duplicated, bounded by `MEMBERSHIP_KEY_MAX_VALUES` and fails closed over the bound, as before.
+- 36b216b: feat(spec)!: one-way sync-in, the spec half: a datasource source, paging and delete policy keys, the refusals a pull needs, and the `managedBy: 'synced'` bucket with every guard that enforces it (ADR-0153)
+  
+  Clause-②: yes (narrowing)
+  Metadata-protocol: narrowed
+  
+  <!-- adr-0087: registered sourced-mapping-upserts-into-synced-object, sync-field-prefix-reserved -->
+  
+  **BREAKING** accept-set narrowing on `data.Mapping` and `data.Object`, beside four new mapping keys the pull engine reads in a later release.
+  
+  - **New keys, declared ahead of the engine that reads them.** `datasourceSource: { object, watermark: { field, start }, full?, deletePolicy?, deletedField? }`, a sibling of `connectorSource` that names a federated object of the stack to copy from; and on `connectorSource`, `paging: { style: 'page' | 'cursor' | 'offset' | 'none', param?, nextPath? }`, `deletePolicy: 'mark' | 'ignore'` and `deletedField`. `deletePolicy` has no schema default: its absence reads as `mark`. Each is a `planned` row of the liveness ledger that warns its author until the pull reads it. `job.pull` accepts a mapping with either source.
+  - **A sourced mapping is refused unless it can be pulled honestly.** At parse: one source at most; `mode: 'upsert'` with a non-empty `upsertKey`; `paging` states the parameter its style needs (and `none` states none). At `defineStack`: the `targetObject` is declared `managedBy: 'synced'`; a `datasourceSource.object` is an object of the stack with an `external` binding; its `external.columnMap` maps a remote column onto `id` (`source_key_missing`); that key is a string or an integer of at most 15 digits of precision (`source_key_not_exact`); `watermark.field` is a `datetime`, `date` or integer field (`watermark_not_exact` when an integer one is not exact); and a `fieldMapping` entry copies it unchanged onto a target field of its type (`watermark_field_unmapped`).
+  - **`managedBy: 'synced'`.** The bucket of a pulled copy: the `engine-owned` affordance row (reads and CSV export only), and `userActions` cannot open a write verb on it, a named exception to ADR-0103 D1, refused at parse and closed by `resolveCrudAffordances`. The engine write guard refuses a member's generic write (403), the `apiMethods` reconciliation strips every write method, the `/me/permissions` clamp answers the closed row, both platform-internal bucket mirrors take it, and the UI bucket union names it. `ObjectQL.outlivesOrganization` does not take it: an organization that still owns synced rows is refused deletion as before.
+  - **`_sync_` is reserved.** A field key starting with `_sync_` is refused on any object and in an object extension; `fieldPatches` is unchanged.
+  - **Lint.** `security-owd-unset` on a synced object recommends `sharingModel: 'public_read'` (a pulled row has no person owner), or `'private'` with a sharing rule that grants read.
+  - **Guidance.** A connector-side `deleteMode` is pointed at `deletePolicy`.
+  
+  ## Before and after
+  
+  ```ts
+  // before: parsed green; now refused at mode, upsertKey and (at defineStack) targetObject
+  mappings: [{ name: 'orders_pull', targetObject: 'order',
+    fieldMapping: [{ source: 'id', target: 'external_id' }],
+    connectorSource: { connector: 'orders_api', action: 'request' } }],
+  objects: [{ name: 'order', label: 'Order', fields: { external_id: { type: 'text' } } }],
+  
+  // after
+  mappings: [{ name: 'orders_pull', targetObject: 'order', mode: 'upsert', upsertKey: ['external_id'],
+    fieldMapping: [{ source: 'id', target: 'external_id' }],
+    connectorSource: { connector: 'orders_api', action: 'request' } }],
+  objects: [{ name: 'order', label: 'Order', managedBy: 'synced', sharingModel: 'public_read',
+    fields: { external_id: { type: 'text' } } }],
+  ```
+  
+  A field named `_sync_…` is renamed outside the prefix (`synced_at`, `source_id`), its stored column with it; a `userActions` entry opening a write on a synced object is removed. There is no automatic rewrite: the key column and the field names are the author's choice. The upgrade guide entries are `sourced-mapping-upserts-into-synced-object` and `sync-field-prefix-reserved`.
+- 99c0b22: fix(plugin-security)!: an agent ceiling permission set is refused on a position assignment, a position definition saved at the metadata door, a seed and the deployment's baseline
+  
+  Clause-②: no (narrowing) — a position whose definition names one of the three MCP agent ceiling sets (`mcp_agent_data_read`, `mcp_agent_data_write`, `mcp_agent_restricted`) is refused at the metadata door (`400 VALIDATION_FAILED`, `invalid_value` at `permissionSets`), on a draft, an active save and a restore; a `sys_user_position` write naming a position whose definition names one is refused (`invalid_value` at `position`) for every writer; a seed write of a `sys_user_permission_set` row naming one is refused like any other write of it (`invalid_value` at `permission_set`); and a `SecurityPlugin` whose `fallbackPermissionSet` or `acceptedDefaultPermissionSets` names one is refused at construction; nothing is widened.
+  Metadata-protocol: narrowed
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no key of any schema is added, removed or re-shaped: a position definition naming an agent ceiling set is refused at runtime authoring and a stored one is left for an administrator to edit, and the replacement set is a person's set chosen by hand, not a mechanical conversion -->
+  
+  **BREAKING** for a deployment that gives people an MCP agent ceiling set through a position, a seed, or the security plugin's baseline options.
+  
+  - **The rule (ADR-0090 D10).** The agent ceiling sets are an AI agent's own grants: the door that admits an agent connected over MCP derives its ceiling from the scopes its user consented to. The direct assignment and the self-registration set refused one already; this release refuses one at four more doors, listed below, with the same refusal (`400 VALIDATION_FAILED`, `invalid_value`).
+  - **A position.** A position gives every holder each set its definition names. The metadata door refuses a position definition whose `permissionSets` names an agent ceiling set (`PUT /api/v1/meta/position/NAME`, as a draft in a package too, and a restore of such a version). Assigning a position whose definition names an agent ceiling set is refused on `sys_user_position`, for every writer: the data API, import and batch doors, an accepted invitation's placement (the membership lands without that position, and the placement miss is reported), and the development demo accounts.
+  - **A seed.** A seed writes the grants it declares — a stack's `data` and a published `seed` item alike — and a seed grant naming an agent ceiling set is refused like any other grant write; the seed's other rows still land and the refused one is reported.
+  - **The baseline.** Every signed-in person holds the deployment's baseline, so `new SecurityPlugin({ fallbackPermissionSet })` naming an agent ceiling set — directly, or as the `isDefault` set among the plugin's `defaultPermissionSets` — and `acceptedDefaultPermissionSets` naming one are refused when the plugin is constructed.
+  - **What these doors do not judge.** They do not judge a position a person holds without an assignment row, or a position definition that reaches the security catalog without passing the metadata door. Whether the read side refuses those is a separate decision with the maintainer.
+  - **The refusal's `constraint`.** The existing refusal on `sys_user_permission_set` now carries `permissionSet` beside `principalKind` in its `fields[].constraint`, as every door's refusal here does; its message is unchanged.
+  - **Unchanged.** Every other permission set flows through these doors as before. An agent connected over MCP holds its ceiling exactly as before. An organization administrator and an identity-provider group mapping are still refused the same sets on the organization boundary first.
+  - **Who moves, and the fix.** A position definition stored before this release that names an agent ceiling set is left as it is: edit it to remove the set (`PUT /api/v1/meta/position/NAME` without it), and its holders stop holding it. A position declared in code that names one: remove the set from the declaration. A seed that grants one: remove that row. A baseline option that names one: name a permission set meant for people (`member_default`, or the deployment's own). After this release, a non-system update of an existing `sys_user_position` row whose position's stored definition names an agent ceiling set is refused, until the definition is edited to remove the set or the row is deleted.
+- 21510bb: feat(plugin-security)!: under a walled tenancy posture every external object states its organization scope
+  
+  Clause-②: no (narrowing) — under the `isolated` and `group` postures an external object (an `external` block) that states no organization scope is refused by name when the boot completes, and one registered after the boot answers no row and accepts no write; nothing is widened, and the `single` posture is unchanged.
+  Metadata-protocol: narrowed
+  
+  <!-- adr-0087: registered external-object-organization-scope-declared -->
+  
+  **BREAKING** for a deployment running the `isolated` or `group` tenancy posture (`OS_TENANCY_POSTURE`) with an external object that states nothing about its organization scope.
+  
+  - **The rule (ADR-0015 §10 as amended, ADR-0095 D1).** The platform provisions no storage for an external object, so the `organization_id` it injects into the registered schema is a column the remote may not carry. Whose rows an external object serves — one organization's or every organization's — is a fact only its author knows, and under a walled posture the object states it, in one of three ways: its own `organization_id` field (the remote rows carry the organization column and the driver returns it; a remote column of another name is mapped onto it with `external.columnMap: { <remote column>: 'organization_id' }`); `tenancy: { enabled: false }` (shared by every organization); or `systemFields: { tenant: false }` (the same opt-out on the system fields). These are the wall's own two opt-out clauses and the one column it reads; the whole-block `systemFields: false` states nothing.
+  - **What the rule does.** `SecurityPlugin` refuses the boot from its `kernel:ready` handler, beside the ADR-0131 D5 refusal, naming every external object that states nothing and the three ways out (`ExternalObjectOrganizationScopeUndeclaredError`). An external object registered after the boot — a Studio import, a runtime datasource — that states nothing answers no row and accepts no write: the Layer 0 verdict is `deny` (`computeTenantLayer0Verdict`), the write wall refuses every insert, update and delete with a sentence naming the undeclared scope and the three ways out, and the plugin says so once in a warning. An object declaring its own `organization_id` is walled: a member of organization A reads only A's rows, through a driver that honours `where` and through one that ignores it (the engine's floor re-applies the predicate), and a row missing the column reads to no one. An object declaring `tenancy: { enabled: false }` or `systemFields: { tenant: false }` is shared.
+  - **`tenancy.tenantField` on an external object is closed the same way.** The organization wall keys on `organization_id` alone, and a declared tenant field is read only by storage the platform provisions, which an external object has none of; so on an external object a `tenantField` naming another column is refused at boot and denied after it, with the remedy spelled out (`external.columnMap` onto `organization_id`, or `tenancy: { enabled: false }`). Local objects are unchanged.
+  - **Who moves.** Every walled deployment with an external object stating nothing: declare one of the three and restart. The showcase's two federated analytics objects now declare `tenancy: { enabled: false }`. A `single`-posture deployment owes no declaration and behaves exactly as before.
+  - **`@objectstack/core`.** `TenantLayer0Input` gains the optional `externalOrganizationScopeUndeclared`; set, the verdict is `deny` under a walled posture, ahead of the platform-admin crossing. Omitted, every existing caller reads as before.
+  - **`@objectstack/spec`.** The ADR-0087 D3 entry `external-object-organization-scope-declared` tells an upgrading operator what to declare.
+  
+  Skills-docs: follow-up #29866 — `content/docs/data-modeling/virtual-objects.mdx` (a multi-organization section), `skills/objectstack-data/rules/datasources.md` (the three declarations), `docs/adr/0015-external-datasource-federation.md` (the §10 and D7 amendment); the sibling docs PR on `claude/sec-hardening-g-docs`, governed (Tier H), landed by the maintainer's hand.
+- 0fd363d: fix(spec)!: an object permission that edits or deletes a record also reads it
+  
+  Clause-②: no (narrowing) — the authoring object-permission schema refuses an entry granting `allowEdit: true` or `allowDelete: true` without read (`allowRead`, `viewAllRecords` or `modifyAllRecords`), a permission set it accepted before; the permission evaluator grants edit and delete only together with read; and a by-id update or delete from a caller the read door refuses answers that refusal. Nothing is widened.
+  Metadata-protocol: narrowed
+  Skills-docs: docs moved — `content/docs/permissions/permission-sets.mdx` states the rule under the object permission bits; `skills/**` teaches no entry granting edit or delete without read (its examples grant read beside edit), so no skill moves.
+  
+  <!-- adr-0087: registered permission-write-without-read-refused -->
+  
+  **BREAKING** accept-set narrowing on `ObjectPermissionSchema` (and so `PermissionSetSchema`, `definePermissionSet`, `defineStack`, `os validate` / `os build`, and the metadata save and publish doors for `permission`).
+  
+  - **Before.** `objects: { crm_lead: { allowEdit: true } }` parsed, and the evaluator granted edit on `crm_lead` to a holder who could not read it.
+  - **Now.** The schema refuses it: one `custom` issue at `objects.crm_lead.allowEdit` (or `.allowDelete`), naming both fixes. `objectPermissionGrants` answers edit and delete as `read ∧ grant` (the shape `allowExport` already had), and `PermissionEvaluator.checkObjectPermission` asks it of the caller's merged entry, so the read half may come from another set — the same answer `/me/permissions` gives the client.
+  - **Stored rows.** A permission set stored before this release keeps loading; its unread edit or delete grant grants nothing. The response-side `EffectiveObjectPermissionSchema` stays tolerant. A built artifact carrying the shape is refused when it is parsed and is rebuilt from a corrected source.
+  - **By-id writes.** A by-id update or delete from a caller whose read of the object is refused — with these grants that is a capability the object requires for a read and not for a write — answers that read refusal for every id it addresses: a caller who cannot read an object writes none of its records by id.
+  - **`@object-ui/app-shell`.** The permission set editor ticks Read when Edit or Delete is ticked, and unticking any bit that reads (Read, View All or Modify All) unticks Edit and Delete once no bit that reads remains on the entry.
+  - Unchanged: `allowCreate` and `allowTransfer` are not part of this rule.
+  
+  **FROM → TO.** `objects: { crm_lead: { allowEdit: true } }` → `objects: { crm_lead: { allowRead: true, allowEdit: true } }` if the set should edit the object, or `objects: { crm_lead: {} }` if it should not. The upgrade-guide entry is `permission-write-without-read-refused` (a semantic migration: no automatic rewrite, because only the author knows which of the two the set means).
+
+### Patch Changes
+
+- eb96480: fix(objectql)!: a non-system write may name, in a `lookup` or `user` field, only a record the caller can read (#29029)
+  
+  Clause-②: yes (narrowing) — the write's reference check narrows: a non-system `lookup` or `user` value naming a record the caller cannot read is refused, and an update's forgiveness of a value the row already stores compares only stored values the caller may read. The business-unit read widens: a delegated admin reads the business units inside the admin scope it holds, and no other.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export or type changes. The refusal is the engine's own localized reference_not_found, so there is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** accept-set narrowing at the write's reference check (`@objectstack/objectql`), served by every write door.
+  
+  After the upgrade, an insert or update that is not a system write is refused with `400 VALIDATION_FAILED` and the field's localized `reference_not_found` when a `lookup` or `user` value it supplies names a record the caller cannot read, before the record's validation rules run.
+  
+  An update that carries back a `lookup`, `master_detail` or `user` value the row already stores is still not judged again, but that comparison reads only stored values the caller may read, by id and in bulk alike. In a column the caller may edit but not read (a field permission `{ readable: false, editable: true }`), every value is judged as new: one naming a record the caller cannot read is refused with `reference_not_found` even when the row already stores it. A caller who can read the column keeps the forgiveness, and a system write is unchanged.
+  
+  A delegated admin whose admin scope covers a business-unit subtree can read the business units in that subtree, and no business unit outside it (`@objectstack/plugin-security`).
+  
+  The parent-write-reach verifier's personas read every record of each object a probed detail's required reference names outside its master chain, so the create probe names records its writer reads (`@objectstack/verify`).
+- a545a04: fix(plugin-security): every member reads and posts comments, and reads the activity history, of the records they can read — the platform baseline `member_default` now grants `sys_comment` (read, create, edit) and `sys_activity` (read)
+  
+  Clause-②: no — runtime permission behaviour (human-floor security/permission class, ruled by the maintainer), not a published accept-set or public-surface widening
+  Metadata-protocol: none
+  
+  Comments (`enable.feeds`) and the activity timeline (`enable.activities`) are on by default on every object, but no shipped permission set named `sys_comment` or `sys_activity`. A member of an app whose permission sets name only the app's own objects — what `create-objectstack` generates — was refused both (`403` on `GET /api/v1/data/sys_comment` and `GET /api/v1/data/sys_activity`), on records they can read: the record page showed "no permission" for comments and activity, and offered no comment box. An app author no longer needs to grant the two objects by hand.
+  
+  - **Which rows is unchanged.** The grant opens the two objects; plugin-audit's parent-record gates still decide the rows, so a member reads and posts comments, and reads the history, of exactly the records they can read, and nothing of any other record — a record another user owns under the app's row scope, or a record of an object the member does not read. A member edits the comments they wrote. The grant carries no delete bit (deleting a comment stays the moderation path, through a delete bit an app grants), no export and no view-all or modify-all.
+  - **`enable.feeds: false` still closes comments** on that object: creating a comment there, or moving one into it, answers `403 FEEDS_DISABLED`. `enable.activities: false` still writes no activity row for the object.
+  - **External members are not reached.** A holder of the `external` organization role does not hold the `everyone` anchor and resolves `external_default` in place of `member_default`, so a portal user still gets comments and activity only through an explicit grant, under the same two gates.
+  - **No log noise.** A member's activity read skips the parent objects they cannot read without reading them, so the console header's feed logs no `[Security] Access denied` line per skipped object.
+  - An app that already grants the two objects to its members keeps working unchanged: permission sets merge most-permissively, so its own lines (a delete bit included) still apply beside the baseline's.
+  - **Lands with the permission-set clone door fix** (`.changeset/30255-clone-inherits-held-grants.md`). This grant first landed alone and was reverted: on a deployment that does not install `@objectstack/plugin-audit`, neither object is registered, and cloning `member_default` answered `422 INVALID_METADATA`. The clone door now copies such a set, so the grant and the fix ship together.
+- 8fed00f: fix(plugin-security): a grant naming no permission set is refused in one line an administrator can act on, and a set's label typed in place of its name is answered with that set's name (#30117)
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A `sys_user_permission_set` write naming no permission set (Setup's grant form, Create User's optional permission set, any non-system grant) used to answer with a paragraph about the column's contract, the security catalog and record ids. It now answers with one line:
+  
+  - a value that is a set's label (trimmed, any case): `'Repair Technician' is the label of the permission set named 'asset_repair_technician': choose it from the list, or enter 'asset_repair_technician'.`
+  - a label more than one set carries: the sets are listed, and none is picked;
+  - anything else: `There is no permission set named 'xyz': choose one from the list.`
+  
+  The refusal itself is unchanged: `400 VALIDATION_FAILED`, one `reference_not_found` entry at `permission_set`, nothing stored. A label is still never accepted as a name. The catalog is listed only on a refusal, agent ceiling sets are never suggested, and a listing that fails leaves the plain sentence and is reported at `warn`.
+- 8f05e61: fix(plugin-security): an organization administrator's update by id is refused before the row is looked up, whatever the id names
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  An organization administrator (`organization_admin` or `organization_admin_no_bypass`, holding no `adminScope`) updates an assignment row (`sys_user_position` or `sys_user_permission_set`) by id. An edit in place is never part of that administrator's right, so the write is refused before the row is looked up: `403 PERMISSION_DENIED`, with the same sentence and details for a row, for a row the administrator cannot read, and for an id that names no row.
+  
+  Unchanged: a removal by id of a row the administrator cannot read, or of an id that names no row, answers the read door's `404 RECORD_NOT_FOUND`. An administrator who also holds an `adminScope` is judged by that scope.
+- 6a70821: feat(security): the recycle bin's two grants are read: `restore` asks `allowRestoreOwnDeleted` and `purge` asks `manageRecycleBin`, and a member restores only the entries they deleted
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  Skills-docs: follow-up #30847
+  
+  Until now every `restore` and `purge` dispatch was refused for every caller but the system, whatever the caller's permission sets granted. The two recycle-bin keys on an object permission are now read (ADR-0148 D5):
+  
+  - **`allowRestoreOwnDeleted`** answers `restore`. It restores only the entries the caller deleted: restoring an entry someone else deleted is refused `403 PERMISSION_DENIED` unless the caller holds `manageRecycleBin` on the object. When the platform cannot tell what the caller holds, that restore is refused.
+  - **`manageRecycleBin`** answers `purge`: purging one entry, emptying an object's entries, and the permanent delete (`delete(…, { permanent: true })`). It also restores any entry, not only your own.
+  - **How the keys fold**: each is bounded by read; `modifyAllRecords` implies both; `manageRecycleBin` implies `allowRestoreOwnDeleted`; `allowDelete` implies neither. `objectPermissionGrants` (`@objectstack/spec/security`) answers both keys this way, and `/me/permissions` reports them.
+  - **The tenant wall on the bin**: a caller the organization wall denies (for example, signed in with no active organization on a multi-organization deployment) now sees no entry: `restore` answers `null`, `purge` answers `false` and `empty` answers `0`. Before, such a caller's `purge` and `empty` were not scoped to any organization. The removal is scoped by the verdict the security layer recorded on the dispatch when it recorded one.
+  - **Record sharing on the permanent delete**: the sharing write gate judges `purge` as the delete it is, so the permanent delete of a record by id is refused (`403 FORBIDDEN`) unless the caller may delete that record (ownership, write depth or Modify All Data; an edit share is not enough), and a bulk permanent delete is scoped to the records the caller may delete. `security/explain` reports a purge against the same delete gate.
+  - **The retired `allowRestore` / `allowPurge` keys stay refused**, but their prescription (and that of the bare `restore` / `purge` keys) no longer says the operations do not exist: it says to delete the key and names the grants that gate the operations now, `allowRestoreOwnDeleted` and `manageRecycleBin`. The residue lint's rule explanation says the same.
+  - `@objectstack/verify`: a write observer now also sees `purge` and `restore`.
+  
+  Grant `allowRestoreOwnDeleted` (with read) to the people who should take back what they deleted, and `manageRecycleBin` to the people who administer the bin. Nothing changes for a caller who holds neither.
+- f7afab8: fix(core,objectql): effective object permissions read the external write gate, so a read-only external object is no longer offered New, Import, Edit or Delete
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **Behaviour.** On an object whose external write gate is closed (ADR-0015 §5.3 Gate 3: a federated datasource, and not both `datasource.external.allowWrites` and `object.external.writable`), every insert, update and delete is refused `403 EXTERNAL_WRITE_FORBIDDEN` for every caller. The effective object-permission map now says so: the entry grants no `allowCreate`, `allowEdit`, `allowDelete` or `allowTransfer`, a `modifyAllRecords` on it is lowered to the `viewAllRecords` read it implies, and `apiOperations` carries no write operation (`create`, `update`, `delete`, `upsert`, `bulk`, `import`, `restore`, `purge`). Read and export are unchanged. Both consumers move together: `/auth/me/permissions` (the console hides those doors with no client change) and `ISecurityService.getEffectiveObjectPermissions`, so `current_user.can(object, 'create' | 'edit' | 'delete' | 'transfer')` now answers `false` on such an object, as the write itself always did.
+  - **`@objectstack/objectql`: `ObjectQL.isExternalWriteForbidden(objectName)`**, the gate's verdict as a read-only question. The write gate (`assertWriteAllowed`) reads the same verdict, so the two cannot disagree.
+  - **`@objectstack/core`: `engineExternalWriteForbidden(engine)`** (the accessor over an engine, asked when the member is present) and the optional `isExternalWriteForbidden` accessor on `EffectiveObjectPermissionsSchemaSource`; `annotateEffectiveApiOperations` takes the same predicate as an optional third argument. A caller that hands over neither gets the map it got before.
+- e00bcc6: i18n(plugin-security): the security objects, built-in permission sets and built-in positions ship in all eleven platform languages
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  The security objects, the names and descriptions of the built-in permission sets and the names of the built-in positions now carry `zh-Hant`, `ar`, `fr`, `pt-BR`, `ru`, `de` and `ko` beside the existing `en`, `zh-CN`, `ja-JP` and `es-ES`, so an administrator in one of those languages reads the security screens in their own language instead of English. Each new locale is registered under its platform-table tag with its source-hash companion, the hand-authored permission-set and position tables carry an entry in every locale, and the package's extract command lists the tags, so the existing `check:i18n` bundle check covers them. Package 7 of #30512.
+- 449c858: fix(plugin-security): `canReadObject`, `getReadFilter` and `security/explain` answer a delegated administrator's read of the business units its scope covers as the read door does
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A delegated administrator reads the business units its admin scopes cover (ADR-0090 D12), and the read door already admitted that read for `find`, `findOne`, `count` and `aggregate`. The answers outside the door did not: `canReadObject('sys_business_unit')` answered `false`, so a unit picker or a door that compiles its own statement refused units the delegate can read, and `security/explain` reported the read as denied. All three now ask the read door's own judgment. `canReadObject` answers `true`, `getReadFilter` confines the read to the covered units (an `id` `$in` filter over them), and `security/explain` reports the read as allowed with the same confinement in its `readFilter`, and a unit outside the scope as not visible. Nothing the door refuses is admitted: a unit outside the scope, a read on behalf of another user, an export and every write stay refused, and a caller with no admin scope is answered as before.
+- ed4b832: feat(plugin-auth): a SCIM group push grants the ordinary permission set its group mapping names
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  An identity provider that pushes a group over SCIM now changes what its members may do. A platform administrator saves a mapping from one SCIM connection's group to one permission set with `POST /api/v1/auth/admin/scim/set-group-mapping` (`connectionId`, `groupExternalId` or `groupDisplayName`, `permissionSet`), and deletes one with `POST /api/v1/auth/admin/scim/delete-group-mapping` (`mappingId`). Both run the platform-admin gate the SCIM credential door runs. A connection whose credential names no organization, or whose credentials name two, is refused `400 VALIDATION_FAILED` on `connectionId`, so every mapping, and every grant it makes, belongs to exactly one organization. Only live credentials (active and unexpired, as the bearer verifier reads them) decide that organization: a credential revoked in one organization does not block a mapping once a new one is minted in another. Saving the same group and set again is idempotent; if that mapping was saved while another organization owned the connection, the save is refused `409 RESOURCE_CONFLICT` naming the old mapping, which must be deleted first. The rows live in the new platform object `sys_idp_group_mapping`, which the data API only lists.
+  
+  When a group's membership changes, `@better-auth/scim`'s projection grants each member the mapped set in the organization that owns the connection, inside the SCIM transaction, written by the connection (`svc:scim:CONNECTION_ID` in the audit trail). Removing a member removes that grant. A group nobody mapped grants nothing. The projection asks the boundary again before every grant it writes, so a set that becomes an administrator set after its mapping was saved grants nothing. A grant the projection did not make, such as one an administrator made by hand, is never removed. Saving or deleting a mapping applies it to the group's current members at once.
+  
+  A mapping can never make anyone an administrator. The save refuses, with `400 VALIDATION_FAILED` on `permissionSet`, every set outside the organization boundary: `admin_full_access`, the organization-administrator sets, the agent ceiling sets, a set with a superuser wildcard or an `adminScope`, and a set with a capability not scoped to the organization. The judgement is plugin-security's own delegated-administration predicate, now served as the optional `ISecurityService.organizationBoundaryFailure(setName)` member. Without a security service the save is refused `503` and nothing is granted.
+  
+  The break-glass guard's refusal no longer tells operators that "the SCIM group mapping is too broad": a group mapping never moves administrator standing, so the sentence now says to grant another account standing first.
+  
+  The v18 organization-ownership ceremony (`os migrate organization-ownership`) inventories `sys_idp_group_mapping` with the attribution fate, like the other organization-owned rows written with their organization: a database that holds the new table plans and applies as before.
+- e735425: feat(security): read one user's effective permission sets, each with where it comes from
+  
+  Clause-②: yes
+  Metadata-protocol: none
+  
+  A user page could list only the permission sets stored as that user's own grant rows. Sets that arrive through the `everyone` default binding or through a held position were never rows, so a user who holds plenty of access through defaults and positions showed none. Now one read lists them all, each with its origins.
+  
+  - **`GET /api/v1/security/users/:id/effective-access`** (`@objectstack/rest`, beside `security/explain`) answers the spec's `EffectiveAccess`: the user, the organization it was resolved in, the positions held there, and the permission sets in force, each listed once with every origin it arrives through (`direct`, `position` with the position's name, `default`, or `derived` with its standing). It takes no query parameter: one is refused `400 VALIDATION_ERROR` naming it. A deployment whose security service does not serve the read answers `501`.
+  - **Who may read whom is explain's caller gate**, now one function both reads call (`mayDescribeAnotherUser` in `@objectstack/plugin-security`): your own access always; someone else's with `manage_users`, as the organization administrator of an organization they belong to, or with a delegated `adminScope` covering them. An id no user has is refused with the same `403 PERMISSION_DENIED`, word for word, as a user you may not manage, for every caller. This is where the read differs from `security/explain`, which answers an admitted caller `404` for an unknown id.
+  - **`ISecurityService.describeEffectiveAccess`** is served by `@objectstack/plugin-security`. The origins come from the resolver itself: `resolveUserAuthzGrants` (`@objectstack/core`) takes a new `withPermissionOrigins` option and returns `permissionOrigins`, recorded where each name is derived. Asking for it is a fresh resolution, like explain's. A resolution that does not ask returns the same envelope as before, from the same reads.
+  - **`client.security.describeEffectiveAccess(userId)`** (`@objectstack/client`) returns `EffectiveAccess`.
+- 3487ccc: feat(core, plugin-security)!: permission sets are read by (package, name), and a package position's sets resolve from its package
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) nothing an author writes is renamed, removed or re-shaped; the change is which permission set a position's bare name reads at runtime, so there is no stored or authored shape for objectstack migrate meta to rewrite -->
+  
+  Permission sets are now resolved by (package, name) (ADR-0150 D3/D4/D7). The security catalog reads each permission set through the one package-scoped rule in `@objectstack/core` and the one declared-closure walk in `@objectstack/metadata-core`, and a position's `permissionSets` resolves from the package that declared the position: that package's own set, else the one holder in its declared dependency closure (plus `sys`), else a refusal that names every candidate. Stored grants, an environment-authored position, an administrator's overlay of a package position and the `everyone`/`guest` anchors still resolve across the whole environment, so they answer as before. Positions are unchanged: one environment-wide slot per name, and a second package holder is still refused. The permission-set list now has one entry per (package, name) holder.
+  
+  Who is affected: a deployment where a package's position names a permission set that its package cannot reach. That happens when the set is held only by an environment-authored item, or only by a package outside the position package's declared dependencies. Before this change the bare name served that set. Now the position grants nothing through that name. The boot's catalog reference report lists each such position with every candidate holder. No first-party package or example does this.
+  
+  Fix: declare a dependency on the package that holds the set, or bind the set through an administrator overlay of the position. An overlay resolves the set the way the environment does.
+  
+  `@objectstack/core` now depends on `@objectstack/metadata-core` at runtime (it was a dev dependency), because the security catalog reads the declared-closure walk from there.
+- 4fd8db3: feat(plugin-security, plugin-sharing): security and sharing stored references gain a package column, backfilled at boot from the one package that holds the name (ADR-0150 D8 R1, R3, R5, R6, R13)
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  Five stored references that name a declared item by its bare name now carry, beside the name, the package that holds it: `sys_user_permission_set.permission_set_package` (R1), `sys_audience_binding_suggestion.permission_set_package` (R3), `sys_sharing_rule.package_id` on package- and platform-managed rows (R5), `sys_queue_member.queue_package` (R6) and `sys_assignment_cursor.rule_package` (R13). Each is nullable, read-only to users, and filled in by the platform.
+  
+  At every boot, once the registry has sealed its holders, each table's rows that name no package are walked and asked the one ADR-0150 D3 rule, from the package that wrote the reference. A grant, a sharing-rule row, a queue member and a cursor are the environment's own rows, so they are asked with no caller package. A suggestion is the reference of the package that made it, so it is asked from that package: its own set first, then the one holder among its declared dependencies. A suggesting package's own set therefore binds to it even where an unrelated package holds a set of the same name from before the one-holder rule, which is D3's answer for that package, not a pick; and a set only an unrelated package holds is left null and reported, never bound to it. A name exactly one package holds is bound to that package. A name the rule refuses (two or more holders, or for a suggestion none among the suggesting package's dependencies) is left null and logged as a warning naming every candidate; it is never bound to the first. A name that only the environment or the platform holds, or that nothing holds, is left null and reported. A row that already names a package is never read again, so a second boot writes nothing and reports the same names. Suggestion rows bound to a dependency of the suggesting package rather than to the package itself are logged too.
+  
+  Nothing reads the new columns yet: who may hold what, which rule shares what, and who a queue routes to answer exactly as before, and no unique key changes. Writers do not stamp the columns yet either; each reader's own card moves its reader and writer together. If the boot pass fails, it logs a warning, leaves its rows as they are and is tried again at the next boot. Rolling back drops nothing a reader needs.
+- 450bfb6: A permission-set grant (`sys_user_permission_set`) and an audience-binding suggestion (`sys_audience_binding_suggestion`) are now read by their `permission_set_package` column (ADR-0150 D8 rows R1 and R3). A set column resolves that exact (package, name) through the core security catalog; a null column keeps today's resolution rule, where a name held by two or more packages is refused, naming every candidate and the `os migrate stored-references bind` fix, and confers nothing. One write seam per table stamps the column on every write that names a set, by the same rule the boot backfill uses. Because the column now decides which `admin_full_access` a grant confers, it is declared on the administrator standing surface, and the last-administrator guard counts a write that re-points it like one that re-points the name. The install gate is unchanged: a permission-set name is still held by one package per environment.
+  
+  Clause-②: no
+  Metadata-protocol: none
+- 5a8dbc7: feat(security)!: an AI service account is the agent principal of its own requests, under the agent ceiling (ADR-0151 D3)
+  
+  Clause-②: no (narrowing) — every agent principal's permission sets are now read under the agent ceiling (no View All, no Modify All, no transfer, restore or purge, no system permission, no admin scope). The OAuth-connected assistant's first-party sets carry none of these bits, so only a deployment that edited its own agent set to carry one sees a narrower answer. No door, request or response shape, error code or status changes.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of a package root is removed or retyped. The narrowing reads only agent principals' permission sets at evaluation and refuses one class of assignment write; there is no stored shape for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** for an agent principal whose permission sets carry View All, Modify All, a destructive grant (transfer, restore, purge), a system permission or an admin scope. Measured first-party: 0 (none of the 3 OAuth agent ceiling sets carries any of these bits, and no AI service account row can exist until registration lands).
+  
+  - **Before.** An agent principal's sets were applied as written.
+  - **Now.** Those bits are cleared when the sets are read, and assigning such a set (or a position binding one) to an AI service account is refused by name.
+  - **The remedy.** Grant the agent the CRUD bits it needs on the objects it reads; a bypass bit or an administrative grant is a person's to hold.
+  
+  An AI service account (a `sys_user` row whose `principal_kind` is `agent`) now acts as itself. Its API key, on REST, on `/mcp` and over stdio, admits a context whose `userId` is the account, with `principalKind: 'agent'` and no `onBehalfOf`. Its own grants are its whole authority:
+  
+  - It does not receive the `everyone` anchor's permission sets or the member baseline. Its floor is the restricted agent set, so a new account can do nothing until it is granted something.
+  - It carries no system permission and is never a platform or organization administrator, whatever it holds: it never carries `admin_full_access` or an organization administrator set at all, so no reader that judges standing by a set's name (the approvals override and the `admin_rescue` slate among them) counts it.
+  - Every agent principal's permission sets are read under the agent ceiling: no View All, no Modify All, no transfer, restore or purge, no system permission and no admin scope. A set edited after it was assigned still grants nothing above the ceiling. The permission sets an OAuth-connected assistant receives carry none of these bits, so it is unchanged.
+  - Assigning an account a permission set, or a position whose sets, carry any of those bits is refused `400 VALIDATION_FAILED` (`invalid_value`), naming the set and what in it is above the ceiling.
+  
+  Flow runs, attachment and comment access checks, mention checks and the access explainer read the account as the agent it is. A person's sign-in, keys and grants are unchanged.
+  
+  Nothing registers an AI service account yet; the registration, key and lifecycle doors follow in a later change.
+- fb94249: feat(plugin-auth): register an AI service account and mint its API key (ADR-0151 D1, D4)
+  
+  Clause-②: yes (widening) — two new auth doors (`POST /api/v1/auth/service-account/register`, `POST /api/v1/auth/service-account/create-key`), two new `sys_user` actions, and `readRequestedApiKeyExpiry`, `signApiKeyExpiry`, `ApiKeyExpiryRefusal` and `ApiKeyExpiryCeilingRefusal` newly exported by `@objectstack/core`. Nothing existing is removed, retyped or refused: the break-glass guard and the upgrade-report audience now leave AI service accounts out, and an account row is only written by the new door (or by a seed).
+  Metadata-protocol: none
+  
+  An organization administrator, or a platform administrator, can now register an **AI service account**: Setup → Users → *Register AI Service Account*, or `POST /api/v1/auth/service-account/register` with a `name` and an optional `ownerId`. One act writes a `sys_user` of kind `agent`, accountable to the named owner (the caller by default; the owner must be an active member of the organization), with a placeholder email that is never delivered and never collides with a real address, and a plain `member` membership of the caller's active organization. If either write is refused, neither stays.
+  
+  The account's owner, an administrator of its organization, or a platform administrator mints its API key: *Create API Key* on the account, or `POST /api/v1/auth/service-account/create-key` with `userId`. The key is shown once, bound to the account's organization, and signed under the same expiry policy and ceiling as `POST /api/v1/keys` (the two now share one rule in `@objectstack/core`); a date past the ceiling is refused `400 VALIDATION_FAILED` at `expires_at`, with the message `POST /api/v1/keys` gives, which names the latest date allowed. `POST /api/v1/keys` answers exactly as before. The key acts as the account, under the agent ceiling.
+  
+  Both doors read the caller from a signed-in session only: anonymous is `401`, and a caller carrying only an API key (the account's own included) is `401` too, so an account can neither register another nor mint its own key. Refusals reuse the existing codes: `403 PERMISSION_DENIED`, `400 VALIDATION_FAILED`, `404 RESOURCE_NOT_FOUND` for an id that is not an account, `409 RESOURCE_CONFLICT` for an account with no active membership, `503` when the authority read is unavailable.
+  
+  An AI service account is never counted as one of the administrators the break-glass guard keeps (whatever grant or membership grade it holds), and never receives the upgrade report or counts as an organization's administrator there.
+- e627eaa: feat(spec,objectql,plugin-security): a hook reads which kind of principal is calling, so an AI service account is recognised as the agent it is
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  
+  A hook now reads `ctx.session.principalKind`, the request's own principal kind (`human`, `agent`, `service`, `guest` or `system`) copied verbatim from the execution context (ADR-0151 D5). Until now a hook could tell an agent acted only from `ctx.provenance.performedByClientId`, which only an OAuth client acting for a person carries, so an AI service account acting as itself looked like a person. Both kinds of agent now read `agent`; `performedByClientId` still tells them apart (set for an OAuth client, absent for an account, whose `userId` is the account itself).
+  
+  A person reads `human` through every door. The key is absent when the execution context carries no kind (a programmatic or system call), which the execution context reads as `human`; it is never defaulted, so a context that lost its kind cannot report an agent as a person. A kind alone never creates a session. It is descriptive only: authorization stays with the security service, which already clamps an agent to its ceiling before any hook runs.
+  
+  An administrator's explanation of another user (`?userId=` on the access explain) now names a person's `principal.principalKind` as `human`, matching the explanation they get of themselves; an AI service account already read `agent`.
+  
+  Audit rows are unchanged: an AI service account's writes, action calls and data exports already record the account as `user_id`, with no `performed_by`, no `on_behalf_of` and no kind column (ADR-0118 D5).
+  
+  Nothing to migrate: a hook that does not read the key sees no change.
+- d9f626b: refactor: "is this object federated (ADR-0015 `external`)?" has one runtime binding, and it reads the spec predicate
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  `@objectstack/core`'s `isFederatedObject` now returns `!platformProvisionsStorage(schema)` from `@objectstack/spec/data`, the one spelling of that question. `@objectstack/plugin-security` and `@objectstack/plugin-sharing` re-export core's binding from `federated-phantom-anchors.ts` instead of holding their own copies, so every existing import keeps resolving. The remaining hand-written copies of the `external` presence test now ask the same binding: the objectql search companion gate, `os migrate` (unmapped columns, the drift pass and the managed-drift coverage), the analytics federation gate (ADR-0062 D6), the schedule trigger's inert-scope bind line and the save door's datasource-binding read. Behaviour is unchanged on every object record and on `null`, `undefined`, arrays and primitives.
+- aad7d2f: fix(security): carry each permission set's package from the grant to the per-request evaluation
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  When two installed packages each ship a permission set of the same name, a request now gets the set its grant names and no other. The authorization resolver records the `(package, name)` each granted set resolved to on `ExecutionContext.permissionSetAddresses`, and the security plugin's evaluator reads every set through the security catalog at that address. It used to take the first set of the name the metadata list returned. A name that arrives with no address (an API key's seeded sets, an agent's scope ceiling, the baseline) resolves by ADR-0150 D3 with no caller: one holder answers as before, two or more are refused, naming every candidate once in the log, and nothing is granted.
+  
+  The activation ledger now switches a set off per holder, through its row's `package_id`: switching off one package's `sales_rep` leaves another package's `sales_rep` granting. A set the `everyone` anchor carries because a deployment accepted a package's suggestion resolves at the package the suggestion row names. The access explainer reports the same holders enforcement reads. Every context built by hand from the resolver's grants (objectql's scoped context, a `runAs: 'user'` flow run, storage, the audit mention gate and the organization-administrator check) carries the addresses with the names.
+  
+  A deployment where every set name has one holder sees no change.
+  
+  Two server-side exports gain a field and an option, and keep what they had. `readDisabledCatalogNames(...)` (`@objectstack/core`) adds `permissionSets`, its switched-off holders, asked with `permissionSetSwitchedOff(disabled, packageId, name)`; its `permissions` name set is unchanged. `PermissionEvaluator.resolvePermissionSets` adds `options.catalogLoader`, which takes `{ name, packageId? }` requests; called without it, the method reads the metadata list, the bootstrap sets and the by-name loader as before. Resolved sets come back in the order they did before.
+- 4f6fb53: fix(security): read every administrator identity and every grant gate by the permission set's package, not its name alone
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  When another package ships a permission set under one of the platform's names (`admin_full_access`, `organization_admin`, `organization_admin_no_bypass`), a grant of that package's set is now granted like any other set and confers no administration. Platform standing, the tenant-administrator rung, the approvals override, the access explainer's posture, the break-glass guard's administrator count, the Default Organization's owner binding, the role-change answer and the upgrade report's recipients all read the platform's own set: the holder whose package declares the kernel namespace `sys`. The deployment-config administrator is given the platform's `admin_full_access` even beside another package's set of that name.
+  
+  The delegated-admin gate compares `(package, name)`. A scope's allowlist names a holder: each name resolves from the package of the set that carries the scope, so a delegate allowed to grant one package's `sales_rep` cannot grant another package's `sales_rep`, by a direct grant or through a position. A grant is judged at the holder its package column names, and at the holder the write seam will stamp from the name.
+  
+  The security plugin's evaluator, when no security catalog is bound, no longer picks the first of two sets that share a name: such a name grants nothing and is logged, naming every holder.
+  
+  A deployment where every set name has one holder sees no change.
+- d51079c: fix(plugin-security,service-realtime): name the person, not the raw user id, in the `sys_user_position` and `sys_presence` record titles
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  Setup's User Positions list, the assignment's record page heading and the audit log's Record cell read `sys_user_position`'s record title, which printed the stored user id (`v34DfZXy… → showcase_exec`). The title now reads the user's name, or their email where the name is blank (`QA Member S2 → showcase_exec`), the same way `sys_user_permission_set`'s title already does. The title is computed when the row is read, so existing rows show the new text with no migration. A reader who may not see that user gets an empty title instead of the user's name. The position half still shows the position's API name.
+  
+  `sys_presence`'s record title gets the same change and shows the status label: `QA Member S2 (Away)` instead of `usr_… (away)`.
+- 474c030: fix(plugin-security): an assignment write the administrator cannot address answers not-found, as a read does; a refusal names only values the caller can read
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  An organization administrator or a delegated administrator (a caller holding an `adminScope`, an organization administrator who holds one included) updates or removes an assignment row (`sys_user_position` or `sys_user_permission_set`) by id.
+  
+  - **A row the caller cannot read, and an id that names no row,** now answer `404 RECORD_NOT_FOUND`: the read door's answer for that object and id, which is what a by-id write of any other object already answers. Both used to answer `403 PERMISSION_DENIED` ("the assignment row … could not be read"). An organization administrator's edit in place is asked the same question first, so an edit of a row it reads is still refused as an edit.
+  - **A caller the read door refuses outright** (no read grant on the table) still gets that read refusal.
+  - **A refusal names a value only when the caller can read it.** A delegated administrator's `DELEGATION_SCOPE_VIOLATION` names the row's position, business unit, holder or permission set only when the caller's own read returns that column at its stored value, or when the caller wrote the value itself. Otherwise the sentence is the same without the value (for example "the assignment's position distributes a permission set which is not in the scope's allowlist"), and `details` leaves the value out. The verdict does not change: it is still taken on the stored row.
+  - **Unchanged.** A row the caller reads keeps its verdict and its guidance. Inserts and tenant-level administrators are judged as before, and every write that was admitted is still admitted.
+  
+  For clients: a by-id update or delete of an assignment row that is gone now answers `404`, as it does on every other object.
+- 70981e6: fix(plugin-security): a by-id write's row re-read propagates a store fault, and judges the platform's own predicates without the caller-predicate guard
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  Before an update or delete by id, the security middleware re-reads the addressed row under the caller's context with the platform's write predicates for that row (the tenancy wall and the row-level write predicates). Two rules hold for that re-read, and the second for the controlled-by-parent master read a detail write asks as well:
+  
+  - **A store fault propagates as raised.** A re-read the store cannot answer (an unavailable datasource, a driver failure) is the write's answer, unchanged — for `ERR_DATASOURCE_UNAVAILABLE` the transports answer `503` — and nothing is written. Only a declared refusal (a 4xx) keeps the record-level `403 PERMISSION_DENIED`, one answer whatever the id names. The controlled-by-parent master read keeps its `403` for every failure.
+  - **The platform's own predicates are not the caller's predicate.** The field-level predicate guard refuses a caller's filter on a field its field rules do not let it read, and judges only the caller's predicate: a predicate subtree the platform composed and marked as its own is not judged. That holds for every such subtree that reaches the guard inside a caller-context read — the by-id write re-read and the controlled-by-parent master read, the analytics read-scope merge handed to an aggregate under the caller's context, and a record-sharing read scope composed before the security middleware. Only platform-composed predicates are exempt; nothing the caller writes is. Under the `group` and `isolated` tenancy postures, a caller whose field rules hide the organization column updates and deletes the records of its organization by id, writes a controlled-by-parent detail under a master of its organization, and aggregates over the records of its organization. A record of another organization and an id that names no record answer that caller exactly as they answer any other caller.
+  
+  Unchanged: a caller's own filter on a field it cannot read is refused, on a read, an analytics query and a predicate write; a record the caller reads but may not write keeps its `403`; a system write is not the gate's.
+- bca2a51: fix(plugin-security, lint): a refused controlled_by_parent write names no master to a writer who cannot read the master reference, and lint warns a set that hides that reference
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **The rule.** A write of a `controlled_by_parent` detail needs edit access to the master its stored master reference names (ADR-0055 §3), whatever the writer may read. Who is admitted and who is refused does not change.
+  - **The refusal's words follow the writer's field-level security on that reference.** A writer who can read the master reference keeps today's refusal, word for word. A writer who cannot read it (field-level security `readable: false` on the reference) gets the same `403 PERMISSION_DENIED` with a sentence that names no master object, no master record and no check: `… requires edit access to its master record (no edit permission on the parent record of this detail)`. This applies to every refusal of the master-detail write check (the master's object permission, its row-level security, its record sharing, a master further up the chain, and the owner rule of a row whose optional master is empty), on an update, a delete and a create alike. "Can read" is the readable projection the data plane's reads mask by; when it cannot be resolved, the refusal takes the generic sentence. This narrows refusal text only: no status, code, accepted input or success answer changes.
+  - **New lint warning `security-controlled-by-parent-master-reference-hidden`.** `@objectstack/lint` (and so `os lint`, `os validate` and the metadata save of a permission set or object, which reports it without refusing the save) warns a permission set whose field permission hides the master reference of a `controlled_by_parent` detail (`readable: false`): the hidden field still decides every write of the detail by that set's holders, and a holder refused there sees only the generic refusal. Not reported when the same set holds View All or Modify All on the detail, which makes the mask inert. `os explain security-controlled-by-parent-master-reference-hidden` prints the rule. The rule id is exported as `SECURITY_CBP_MASTER_REFERENCE_HIDDEN`, the widening this changeset declares.
+  - **A warning still fails a strict run.** Nothing is refused by this rule, but a pipeline that runs `os lint --strict` or `os validate --strict` fails on any warning, so a stack that hides a master reference fails such a pipeline until the reference is made readable or the strict flag is dropped.
+- 42e1211: fix(plugin-security): a delegated administrator's refused assignment write answers the same for a row it cannot read as for a missing one
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A delegated administrator — a caller holding an `adminScope`, an organization administrator who holds one included — updates or removes an assignment row (`sys_user_position` or `sys_user_permission_set`) by id. The delegated-administration gate (ADR-0090 D12) now asks first whether the caller itself reads that row, in its own context.
+  
+  - **A row the caller cannot read** is answered exactly as an id that names no row is: the read door's `404 RECORD_NOT_FOUND` for that object and id. Both are answered at the gate, before any later step judges the write.
+  - **A row the caller reads** keeps the verdict and the guidance it had: the gate judges the stored row, as before.
+  - **A caller the read door refuses outright** (no read grant on the table) is answered as before: the read refusal, for every id the gate refuses, and the writes it was admitted are still admitted.
+  - **Unchanged.** Inserts, tenant-level administrators, and organization administrators who hold no scope are judged as before.
+- 18cdcb2: fix(plugin-security)!: a delegate can neither capture nor evict a direct grant beyond its scope
+  
+  Clause-②: no (narrowing) — an edit that points a direct permission-set grant at another user is judged on both holders it touches, the user it takes the grant from and the user it gives the grant to, and an edit that re-names a stored grant's set is judged on the set it takes away as well as the set it grants, so a delegated administrator no longer moves a grant away from a holder outside its subtree or from a holder it cannot read, nor re-names a stored grant of a set outside its allowlist. Nothing is widened: no export, error code or status is added.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of the package entry changes: a direct grant keeps its shape and meaning, each holder an edit touches is judged as a target user already is, and the set an edit takes away is judged as the removal of that grant already judges it. There is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** accept-set narrowing in the delegated-administration gate (`@objectstack/plugin-security`), only for a delegated administrator editing a stored direct grant's holder or set.
+  
+  - **Rule.** A delegate can neither capture nor evict a direct grant beyond its scope (ADR-0090 D12). A delegated write on a direct permission-set grant is judged on every holder and every set it touches. An edit that points a stored grant at another user is judged on the holder it takes the grant from and on the holder it gives the grant to, each exactly as the gate judges a target user — through the caller's own read, and inside the subtree only through one of the subtree's business units. An edit that re-names a stored grant's permission set is judged on the set it takes away exactly as the removal of that grant judges it — the allowlist, the security catalog and strict containment — beside the set it re-names the grant to, judged as before.
+  - **What a caller sees.** An edit with either holder outside the subtree, or a holder the caller cannot read, answers `403 DELEGATION_SCOPE_VIOLATION`, with the sentence and details of every target outside the subtree, whichever end it is. A re-name away from a set outside the allowlist answers the refusal the removal of that grant answers — `403 DELEGATION_SCOPE_VIOLATION`, "permission set '…' is not in the scope's allowlist", with that set in its details — and a re-name away from a set whose removal is refused on any other ground gets that refusal. The stored holder and the stored set are named only when the caller reads them. A stored grant that names no holder is moved only by a tenant-level administrator (`403 PERMISSION_DENIED`).
+  - **Unchanged.** The judgment of the set an edit points a grant at; an edit that keeps both the holder and the set, an insert and a removal; a tenant-level administrator's writes; an organization administrator's writes, whose right creates and removes a grant and never edits one in place.
+  - **Who moves.** A delegate can no longer move a direct grant away from a holder outside its subtree, nor re-name a stored grant of a set outside its allowlist. A holder it cannot read counts as outside its subtree, and a grant it could not remove it cannot re-name. Such a grant is moved or re-named by a tenant-level administrator, or removed and granted anew by an administrator whose boundary covers it.
+- cd6618e: fix(plugin-security): a delegated refusal names one reason for a target user the caller cannot read
+  
+  Clause-②: no — no accept set changes at the write door: every write refused before is still refused, and every write admitted is still admitted. No error code, class or status is added: the answer is the gate's existing scope violation.
+  Metadata-protocol: none
+  
+  - **Rule.** A target user is inside a delegated business-unit subtree only through a business unit of that subtree. A delegated administrator's direct permission-set grant whose target user is outside the subtree is refused with one answer, whether or not the user exists or holds a business-unit membership: `403 DELEGATION_SCOPE_VIOLATION`, the same sentence ("target user … is outside the delegated subtree") and the same details.
+  - **A target the caller cannot read.** A target user the grant names (a new grant, or a stored grant pointed at another user) is first asked of the caller's own read door, the question the engine's reference check asks of that user. A user the caller cannot read is answered as a user that does not exist, so it is outside the subtree and gets the same answer.
+  - **What a client sees.** A grant to a target user who holds no business-unit membership, or whom the caller cannot read, answers that scope violation, so a console shows its reason, as it does for every other target outside the subtree.
+  - **Unchanged.** A target user the caller reads, with a business unit inside the subtree, is admitted exactly as before.
+- c86d3c9: fix(plugin-security)!: a delegated scope held in a context that names no organization covers nothing
+  
+  Clause-②: no (narrowing) — the delegated-administration gate resolves a delegated scope only inside the caller's active organization, so a context that names no organization holds no subtree: it covers no business unit and no user, the delegable-scope report lists no scope and no placeable unit — a tenant-level administrator's report included — and a write under the scope is refused naming the missing active organization. Nothing is widened: no export, error code or status is added.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of the package entry changes: an adminScope keeps its shape and meaning, and the subtree it names resolves in the caller's active organization only. There is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** accept-set narrowing in the delegated-administration gate (`@objectstack/plugin-security`), only for a context that names no organization.
+  
+  - **Rule.** A delegated scope held in a context that names no organization covers nothing (ADR-0123 D2: "Tenant-scoped reads resolve to nothing; tenant-scoped writes are refused loudly"). For such a context every answer that reads the scope's subtree is empty: the delegated business-unit read admits nothing, so the read door refuses it `403 PERMISSION_DENIED` as it does for a caller holding no scope; the delegable-scope report lists no scope, no placeable unit and no position assignable through a scope; the explain coverage of a user is false. A tenant-level administrator's delegable-scope report offers such a context no placeable unit either: the units it offers are its active organization's, and a context that names none has none. An assignment or direct grant written under the scope is refused `403 PERMISSION_DENIED` with a message naming the missing active organization, the wording an organization administrator's refusal of the same state already carries.
+  - **Unchanged.** A context that names its organization gets every answer it got before, a tenant-level administrator's report included. The writes of a tenant-level administrator, an organization administrator's writes and reports, and a self-delegation of duty are judged as before, and a tenant-level administrator's report still lists the positions it may assign.
+  - **Who moves.** Nobody whose sessions carry an active organization: every session on a stock `single` deployment carries the Default Organization (ADR-0131 C1). A caller that reaches the gate with no active organization selects one first.
+- c1e08fe: fix(plugin-security)!: a delegated business-unit subtree stays inside one organization, whether or not the caller's context names one
+  
+  Clause-②: no (narrowing) — the delegated-administration gate bounds every delegated business-unit subtree to one organization: the caller's when its context names one, otherwise the scope root's own. A unit of another organization is outside the subtree, and so is every unit below it, even where its parent link names a unit inside the scope. Nothing is widened: no export, error code or status is added.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of the package entry changes: an adminScope keeps its shape and meaning, and the subtree it names is bounded to one organization for every caller. There is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** accept-set narrowing in the delegated-administration gate (`@objectstack/plugin-security`), for a business unit whose organization differs from its subtree's only.
+  
+  - **Rule.** A delegated scope covers the units of ONE organization: the scope root and its descendants that carry that organization. Every answer that reads the subtree follows it — the delegated business-unit read (the read door, `canReadObject`, `getReadFilter`, `security/explain`), an assignment or direct grant written under the scope, the delegable-scope report and the explain coverage of a user. A unit outside it is refused `403 DELEGATION_SCOPE_VIOLATION` on a write and left out of every read and report.
+  - **Unchanged.** A context that names its organization gets every answer it got before. A unit of the subtree's own organization is inside the subtree, as before. A store whose units carry no organization keeps its whole tree.
+  - **Who moves.** Nobody whose business-unit tree keeps each unit in its parent's organization.
+- 983abd9: fix(plugin-security)!: a delegated answer about a user the caller cannot read does not depend on that user's existence or memberships
+  
+  Clause-②: no (narrowing) — the delegated-administration gate judges every target user through the caller's own read, so a user the caller cannot read is outside every delegated subtree: a delegated administrator no longer edits or removes a stored direct grant of such a user, and no longer explains such a user's access or reads its effective access. Nothing is widened: no export, error code or status is added.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of the package entry changes: an adminScope and a direct grant keep their shape and meaning, and a target user is judged through the caller's own read. There is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** accept-set narrowing in the delegated-administration gate (`@objectstack/plugin-security`), only for a delegated administrator asking about a user it cannot read.
+  
+  - **Rule.** A delegated answer about a user the caller cannot read does not depend on that user's existence or memberships (ADR-0090 D12). Wherever the gate judges a target user, such a user is outside every delegated subtree, exactly as an id naming no user is: the holder a direct grant names (a new grant, or a stored grant pointed at another user), the holder a stored grant keeps (its removal, or an edit that leaves `user_id` as stored), and the user the explain doors ask about.
+  - **What a caller sees.** A delegated direct-grant write whose target user the caller cannot read answers `403 DELEGATION_SCOPE_VIOLATION`, with the sentence and details of every target outside the subtree. `security/explain` with a `userId`, and `security/users/:id/effective-access`, answer a delegate asking about a user it cannot read with their refusal of a user the caller may not describe (`403 PERMISSION_DENIED`), the answer an id naming no user gets.
+  - **Unchanged.** A target user the caller reads is judged as before, on its business units. A tenant-level administrator's writes, and an organization administrator's writes and explain coverage, are judged as before.
+  - **Who moves.** A delegate whose stored grant's holder it cannot read can no longer edit or remove that grant, and a delegate can no longer explain, or read the effective access of, a user it cannot read. Tenant-level and organization administrators keep both: either still removes such a grant, and explains such a user, as before.
+- 669a8aa: fix(plugin-security)!: a delegated business-unit walk never starts at a unit outside the caller's organization
+  
+  Clause-②: no (narrowing) — the delegated-administration gate holds the root of every delegated business-unit walk to the same organization as its descendants, so the range a self-delegation's anchor is judged against holds units of the caller's organization only. Nothing is widened: no export, error code or status is added.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) No key of any schema is added, removed, renamed or re-shaped, and no export of the package entry changes: a delegation row keeps its shape and meaning, and the range its anchor is judged against is bounded to the caller's organization. There is nothing for a migration to rewrite and no tombstone. -->
+  
+  **BREAKING** accept-set narrowing in the delegated-administration gate (`@objectstack/plugin-security`), only for a self-delegation that is anchored, or whose holding is anchored, at a unit outside the caller's organization.
+  
+  - **Rule.** ADR-0105 D6 (red line 2): every business-unit mechanism operates within one organization. A delegated business-unit walk, its root included, covers only units of the caller's organization. A self-delegation (ADR-0091 D3) anchored at a unit outside the caller's organization, or whose holding's anchor is outside it, is refused `403 PERMISSION_DENIED` with the same answer as an anchor outside the delegator's range, and nothing is stored.
+  - **Unchanged.** An anchor inside the delegator's range, and an unanchored delegation, are admitted as before. A scope's by-name anchor keeps every answer it gave.
+  - **Who moves.** Nobody whose delegations and holdings anchor at units of their own organization.
+- 72d7db0: **Shipped in 18.3.0**, whose CHANGELOG missed this entry; listed here one release late.
+  
+  fix(plugin-security): an organization administrator's refused assignment write answers the same for a row it cannot read as for a missing one
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  An organization administrator (`organization_admin` or `organization_admin_no_bypass`) removes an assignment row (`sys_user_position` or `sys_user_permission_set`) by id. The delegated-administration gate (ADR-0090 D12) now asks the administrator's own read, in its own context, whether that row is there to remove.
+  
+  - **The removal of a row the administrator cannot read** is answered exactly as the removal of an id that names no row is: the read door's `404 RECORD_NOT_FOUND` for that object and id.
+  - **A row the administrator can read** is judged on the stored row. A refusal names the organization boundary, and names the row's organization, position or permission set only when the administrator's own read returns that value as stored.
+  - **Unchanged.** An edit in place of a row it reads is refused as before, every removal that was admitted is still admitted, and a tenant-level administrator is judged as before.
+- d0da880: fix(plugin-security): an organization administrator's assignment removal is judged on the stored row, and its refusal names only values the caller can read
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  An organization administrator (`organization_admin` or `organization_admin_no_bypass`) removes an assignment row (`sys_user_position` or `sys_user_permission_set`) by id. Once its own read returns the row, the delegated-administration gate (ADR-0090 D12) judges the removal on the stored row, as it judges a delegated administrator's write.
+  
+  - **The verdict is the stored row's.** A field rule or a masking rule on the row's `position` or `permission_set` does not change it: the removal of a row inside the organization boundary is admitted, and the removal of a row outside it is refused.
+  - **A refusal names a value only when the caller can read it.** The row's organization, its position and the sets that position carries, or its permission set are named only when the caller's own read returned that column at its stored value. Otherwise the sentence leaves the value out, for example "the assignment's position is not inside the organization boundary", and `details` leaves it out too.
+  - **Unchanged.** A row the caller cannot read, and an id that names no row, still answer the read door's `404 RECORD_NOT_FOUND`. An edit in place is refused as before. Inserts, tenant-level administrators and delegated administrators are judged as before.
+- e669735: fix(plugin-security): a refused grant holder the caller cannot read is answered as a holder that does not exist
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  A non-system write to `sys_user_position` or `sys_user_permission_set` that names a `user_id` the caller's own `sys_user` read does not return is now answered by the engine's reference check, the way every other user reference that caller names is answered: `400 VALIDATION_FAILED` with the engine's `reference_not_found` entry at `user_id`, in the caller's locale. A holder the caller can read is judged on organization membership as before and keeps the membership refusal with its remedy. Which writes are refused is unchanged, and so are the status and the codes: only the field entry a holder the caller cannot read receives is the reference check's. Under the shipped organization administrator's `sys_user` read (its own row and its organization's members), a user outside the organization now receives that entry.
+- d7c0389: fix(plugin-security)!: a write from a caller the read door refuses is refused, whatever rows it addresses
+  
+  Clause-②: no (narrowing) — a predicate update or delete (`multi: true`, addressed by a `where`) from a caller whose read of the object is refused is refused with that read refusal before the write runs, where it was admitted before; nothing is widened.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no metadata an author writes changes and no stored row is rewritten: a runtime write from a caller the object's read refuses is refused -->
+  
+  **BREAKING** for a caller whose read of an object is refused while its write is admitted, and that updates or deletes that object's records by predicate. With the permission model's own grants that caller exists in one shape only: an object whose `requiredPermissions` map gates `read` and not `update` or `delete` (ADR-0066 ⑤), and a caller holding the write grant without the capability the read requires.
+  
+  - **The rule.** A caller the read door refuses writes none of the object's records, by id or by predicate. The predicate update and delete such a caller addresses — a flow's `update_record` or `delete_record` node with `multi: true` run as that user, or an engine `update` / `delete` with `multi: true` under that caller's context — now answer the read door's own refusal (the `PERMISSION_DENIED` envelope that caller's read gets), and nothing is written. The by-id update and delete are refused too.
+  - **Unchanged.** A caller who reads the object keeps its predicate write, scoped to the records it reads. A caller the object's CRUD grants refuse is refused as before. A write the platform issues under the caller's context (a hook's or a cascade's own write, the referential clear of a deleted record's lookups) and a system write keep their answers. A store fault on the read propagates as before.
+  - **Who moves.** A deployment that relies on such a caller writing by predicate grants it the capability the object's read requires, or gates the write verbs on a capability that caller holds.
+- 6dd2ca5: fix(plugin-security, plugin-auth)!: a person-to-permission-set assignment refuses an agent ceiling set at every write door, and so does the self-registration permission set
+  
+  Clause-②: no (narrowing) — a non-system insert or update of `sys_user_permission_set` that would store an assignment naming one of the three MCP agent ceiling sets (`mcp_agent_data_read`, `mcp_agent_data_write`, `mcp_agent_restricted`) is refused with `400 VALIDATION_FAILED` (`invalid_value` at `permission_set`), for every caller, a platform administrator included; and an audience configuration whose `selfRegistrationPermissionSet` names one is refused (`[audience] invalid audience configuration`), at construction and through the auth settings; nothing is widened.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (no-migration-prescription) no key of any schema is added, removed or re-shaped: a runtime write of an assignment row naming an agent ceiling set is refused and a stored one is left for an administrator to remove, and the runtime audience validation refuses one as the self-registration set, which takes a person's set chosen by hand, not a mechanical conversion -->
+  
+  **BREAKING** for a deployment whose administrators assign an MCP agent ceiling set to users through the permission-set assignment table, or whose audience names one as `selfRegistrationPermissionSet`.
+  
+  - **The rule (ADR-0090 D10).** The agent ceiling sets are an AI agent's own grants. The door that admits an agent connected over MCP derives its ceiling from the scopes its user consented to and puts it on the agent's request; no assignment row is read for it. A `sys_user_permission_set` row is a person's grant, so it never names one. Every door that writes the table refuses such a row: the data API's create and update, `createMany`, `updateMany`, the per-object and cross-object batch, and both import doors (the row fails with `code: 'invalid_value'` at `permission_set`). An update that keeps an assignment naming one in force (a new holder, a validity window, an echo of the set) is refused too.
+  - **The self-registration set (`@objectstack/plugin-auth`).** A self-registrant is a person, so the audience configuration that names the set every self-registrant receives refuses an agent ceiling set, beside its existing refusal of `admin_full_access`: `auth.audience.selfRegistrationPermissionSet` in the stack config stops the boot, and `audience_self_registration_permission_set` in the auth settings is refused while the standing audience keeps ruling. Both answer `[audience] invalid audience configuration: selfRegistrationPermissionSet must not be '...'`.
+  - **Unchanged.** Every other permission set stays assignable, and removing an assignment stays open. A system write is not judged: the platform's fixed-name grant writers name no ceiling, the self-registration grant writes only the validated set, and seed replay and the development-only demo-staff seed write the sets their stack declares. An agent connected over MCP holds its ceiling exactly as before. An organization administrator is still refused the same sets on the organization boundary first (`403 PERMISSION_DENIED`).
+  - **Who moves, and the fix.** An assignment stored before this release that names an agent ceiling set is left as it is, and can no longer be edited: delete it (`DELETE /api/v1/data/sys_user_permission_set/ID`), or rename it to a permission set meant for people. List them with `GET /api/v1/data/sys_user_permission_set?permission_set=mcp_agent_data_read` and the same query for the other two names. An audience that names an agent ceiling set as `selfRegistrationPermissionSet` declares a permission set meant for people instead (`member_default`, or the deployment's own).
+- 917f024: fix(plugin-security)!: an external object that states no organization scope reads as empty for every caller, the platform owner included
+  
+  Clause-②: no (narrowing) — under the `isolated` and `group` postures, an external object registered after the boot that states no organization scope reads as empty for every caller, the declared platform owner included; nothing is widened, and the `single` posture is unchanged.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (already-registered external-object-organization-scope-declared) the operator's remedy is the existing entry's: declare one of the three scopes on the external object; nothing an author writes changes here -->
+  
+  **BREAKING** for a deployment running the `isolated` or `group` tenancy posture (`OS_TENANCY_POSTURE`) that registers an external object after the boot without stating its organization scope.
+  
+  - **The rule (ADR-0015 §10 as amended).** Whose rows an external object serves is a fact only its author can state. Under a walled posture an external object that states none is refused by name when the boot completes, and one registered after the boot — a Studio import, a runtime datasource — reads as empty for every caller, the platform owner included, and accepts no write, until it states its scope. That deny judges the object's configuration, not the reader's organization.
+  - **What is unchanged.** The declared platform owner's reads still cross the organization wall everywhere else: on local objects, on an external object that declares its own `organization_id`, and in a session with no active organization. Writes stay walled for everyone. A member's reads are unchanged.
+  - **Who moves, and the fix.** Declare one of the three on the external object, as the ADR-0087 entry `external-object-organization-scope-declared` prescribes: an `organization_id` field of its own (the rows are then walled by organization), `tenancy: { enabled: false }` (shared by every organization), or `systemFields: { tenant: false }` (the same opt-out on the system fields).
+- bdbaf80: fix: Setup's form help speaks to an administrator, and the queue pages, the mail status banner and the test-email toast read in Chinese on a zh-CN console
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  - **Field help (English source and zh-CN):** the permission set and position assignment forms, the out-of-office (approval delegation) rule, and the business unit, organization and user forms no longer describe the implementation. Gone: "fail-closed", "half-open [from, until)", "agent grants", "graph semantics", "expanded by graph queries", "Null = root of tenant", "HRIS", "When true / When false" (zh-CN 「为 true 时」 now reads 「开启后」) and an HTTP status code. The help now says when an assignment starts and ends, what turning a switch on does, and what to fill in. Text only: no field name, key, option value or behaviour changes.
+  - **`@objectstack/plugin-sharing`:** `sys_queue` and `sys_queue_member` join the plugin's translation bundle, with zh-CN text, so the 队列 and 队列成员 pages, their columns, help and the 新建 button read in Chinese. ja-JP and es-ES carry English fills for now.
+  - **`@objectstack/plugin-email`:** the live-status statement at the top of Setup → Email and the "Send test email" answer (sent, failed, logged only) are written in the caller's display language, en and zh-CN today; another language gets English.
+  - **`@objectstack/service-settings`:** a settings action handler (`SettingsActionHandler`) receives an optional `locale`, the caller's display language read from the request the same way the live-status statement's is (`Accept-Language`, else `?locale`); `runAction` takes it as a fifth `display` argument. Existing handlers compile and behave unchanged.
+- bb67b98: fix(plugin-security): uninstalling a package revokes only the permission-set grants bound to that package
+  
+  Clause-②: yes (widening) — an uninstall's `cleanups` outcome may now carry `reportedGrants`; with one holder of a name every uninstall answers as before.
+  Metadata-protocol: none
+  
+  Uninstalling a package revokes the grants (`sys_user_permission_set`) that name a permission set it declared. Until now it revoked every grant of that name. Once two packages may each hold a permission set of the same name (ADR-0150 D3/D4), that would also revoke users' grants of the other package's set, which that package still holds. The uninstall cleanup now reads each grant's `permission_set_package` column:
+  
+  - **Bound to the uninstalled package:** revoked, as before.
+  - **Bound to another package:** left alone. That package still holds its set, and the grant is its user's access to it.
+  - **Empty column:** revoked in every case. When the uninstalled package was the name's only holder, nothing else changes. When another holder still serves the name after the uninstall, the grant never said which holder it meant, so it is revoked rather than handed to the remaining holder, and it is reported. One warning per uninstall names each such grant's user, organization and set. The uninstall's answer also lists it under the `security.package-permissions` cleanup as `reportedGrants` (`{ user, organization, permission_set }`), so the operator can grant it again with the package named.
+  
+  `UninstallCleanupOutcome` and the `UninstallCleanup` result in `@objectstack/metadata-protocol` gain the optional `reportedGrants` member. `runUninstallCleanups` copies it onto the outcome when a cleanup reports at least one grant, so both uninstall doors (`deletePackage` and install-local's `DELETE /api/v1/marketplace/install-local/:manifestId`) answer it. Today no installation can hold a name twice, because install still refuses a second holder, so every answer is unchanged until that narrowing lands.
+- Updated dependencies [7d0b47c]
+- Updated dependencies [f6a429b]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [c17719d]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [486b0a9]
+- Updated dependencies [9ed2ee1]
+- Updated dependencies [769adff]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [771b2db]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [a52761f]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [f19fbb8]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [0f3ee58]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [af3451b]
+- Updated dependencies [3a27208]
+- Updated dependencies [29cbfcc]
+- Updated dependencies [0c666c3]
+- Updated dependencies [38717d3]
+- Updated dependencies [ac890f5]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [8fed00f]
+- Updated dependencies [25fea77]
+- Updated dependencies [86ae2ca]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [977be38]
+- Updated dependencies [2046d21]
+- Updated dependencies [243eba1]
+- Updated dependencies [740edc5]
+- Updated dependencies [778aedf]
+- Updated dependencies [71318af]
+- Updated dependencies [fd749a4]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [6a8f415]
+- Updated dependencies [67d5d53]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [60fe44f]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [f7afab8]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [e8e924f]
+- Updated dependencies [590724f]
+- Updated dependencies [35cd64c]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [d5f3bc5]
+- Updated dependencies [e3948ae]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [1c5cee6]
+- Updated dependencies [aad1603]
+- Updated dependencies [0e4747a]
+- Updated dependencies [eb68b98]
+- Updated dependencies [1ebe0c5]
+- Updated dependencies [2f05a46]
+- Updated dependencies [b126c13]
+- Updated dependencies [a11ef71]
+- Updated dependencies [deac7f4]
+- Updated dependencies [2ae3e30]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [a59d00a]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [badf24d]
+- Updated dependencies [5268f50]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [7569fb5]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [c77dd17]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [8847e09]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [78eb352]
+- Updated dependencies [2ce2646]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [6bd00d2]
+- Updated dependencies [b5696b4]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [293a85b]
+- Updated dependencies [ed4b832]
+- Updated dependencies [8c9260f]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [f5e23e2]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [98583cd]
+- Updated dependencies [cadd6aa]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [d36d4ad]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [e735425]
+- Updated dependencies [1f37085]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [f4b4c8a]
+- Updated dependencies [db50231]
+- Updated dependencies [0e1311d]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [b6e6545]
+- Updated dependencies [90457e7]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [59630d9]
+- Updated dependencies [fe88ecd]
+- Updated dependencies [5e85952]
+- Updated dependencies [ef4af73]
+- Updated dependencies [7e697ff]
+- Updated dependencies [96b9350]
+- Updated dependencies [d9a232f]
+- Updated dependencies [3487ccc]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [5b7269f]
+- Updated dependencies [2735ca4]
+- Updated dependencies [6dd196d]
+- Updated dependencies [d834a36]
+- Updated dependencies [0cd594b]
+- Updated dependencies [c62e72a]
+- Updated dependencies [450bfb6]
+- Updated dependencies [36a8700]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [5a8dbc7]
+- Updated dependencies [fb94249]
+- Updated dependencies [98ba756]
+- Updated dependencies [e627eaa]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [8fca8f7]
+- Updated dependencies [26d30d7]
+- Updated dependencies [3684d18]
+- Updated dependencies [d9f626b]
+- Updated dependencies [1a66fcf]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [f00fb1b]
+- Updated dependencies [c655af8]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [aad7d2f]
+- Updated dependencies [4f6fb53]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [02498c9]
+- Updated dependencies [7aab601]
+- Updated dependencies [e34723f]
+- Updated dependencies [9052363]
+- Updated dependencies [2b11a71]
+- Updated dependencies [de6d893]
+- Updated dependencies [c147fc2]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [5d4f2aa]
+- Updated dependencies [133f75a]
+- Updated dependencies [f4cd4ec]
+- Updated dependencies [b3d2f4b]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [e1dac19]
+- Updated dependencies [3299873]
+- Updated dependencies [7b2bb66]
+- Updated dependencies [44a030b]
+- Updated dependencies [a794e32]
+- Updated dependencies [21510bb]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [5210acf]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [bdbaf80]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [63a470a]
+  - @objectstack/spec@18.4.0
+  - @objectstack/platform-objects@18.4.0
+  - @objectstack/core@18.4.0
+  - @objectstack/metadata-core@18.4.0
+  - @objectstack/formula@18.4.0
+  - @objectstack/types@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes

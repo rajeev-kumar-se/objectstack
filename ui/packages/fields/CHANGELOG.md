@@ -1,5 +1,476 @@
 # @object-ui/fields
 
+## 18.4.0
+
+### Minor Changes
+
+- f5aaa0b: feat(ui): an action param's `widget` draws the named widget in the action dialog — `widget: 'permission-ref'` on a `text` param is the permission-set picker
+  
+  Clause-②: yes (widening) — `@object-ui/core`'s exported `ActionParamDef` gains one optional member, `widget?: string`; `@object-ui/fields`' `RawActionParam` gains the same optional member. No accepted key, value or answer is taken away.
+  Metadata-protocol: semantic
+  
+  `ActionParamSchema.widget` (declared by `@objectstack/spec` with the same key, vocabulary and meaning as `FieldSchema.widget`) was accepted and stored but read by nothing: the action dialog drew every param with its `type` widget. The console now reads it:
+  
+  - `resolveActionParams` copies the param's `widget` onto the resolved param. A field-backed param (`{ field }`) that inherits the field's `type` also inherits the field's `widget`; a param that overrides `type` does not, because the field's widget was chosen for the field's value. The param's own `widget` always wins.
+  - `paramToField` draws the named widget when it is registered, in place of the `type` widget. A name nothing registers keeps the `type` widget (a `textarea` param stays a textarea), and a registered widget on a lookup param without a target is drawn instead of the plain record-id text box.
+  - So `{ name: 'permissionSet', type: 'text', widget: 'permission-ref' }` opens the permission-set picker: the sets are listed by label beside their machine name, and the machine name is submitted. The server still validates the value by `type`, so the request body is unchanged.
+  
+  The spec's liveness ledger marks `params.widget` live, and its `.describe()` no longer says the key is not read yet.
+
+### Patch Changes
+
+- 8b90442: refactor(fields)!: retire three zero-consumer entry exports (the hex badge palette pair and the url cell renderer)
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (runtime-export-retired @object-ui/fields#deriveHexBadgePalette, @object-ui/fields#HexBadgePalette, @object-ui/fields#UrlCellRenderer) the retired operands are a colour helper, its return type and a React cell renderer of the fields package; nothing in the workspace or in hotcrm imports or names any of them outside the package, and no packages/spec schema, registered node type, conversion surface or stored shape names them, so there is nothing for `objectstack migrate meta` to rewrite -->
+  
+  **BREAKING** for a host that imports any of these three names from `@object-ui/fields`. None had an importer or a mention anywhere outside the package, in the workspace or in hotcrm, so the Console and every `@object-ui/*` package are unaffected. Badges and dots with a declared hex colour and `url` cells render exactly as before.
+  
+  The code stays in the package; only the entry stops publishing it. The hex colour math moves from `index.tsx` to an internal module that `getBadgeHexAppearance` and `getDotHexAppearance` read, and `UrlCellRenderer` stays the renderer the standard map serves for `url` fields. Every other name the entry exported stays exported unchanged, among them `getBadgeHexAppearance`, `getDotHexAppearance`, the `HexColorAppearance` type, `getBadgeColorClasses`, `getCellRenderer`, `EmailCellRenderer`, `PhoneCellRenderer` and `ColorSwatchCellRenderer`.
+  
+  What leaves, and what to write instead:
+  
+  - FROM `deriveHexBadgePalette` TO `getBadgeHexAppearance(hex)` for the pill colours and `getDotHexAppearance(hex)` for the dot colours; both return the derived colours as CSS custom properties on `style`.
+  - FROM `HexBadgePalette` TO the `HexColorAppearance` type those two functions return.
+  - FROM `UrlCellRenderer` TO `getCellRenderer('url')`, which returns the same renderer (or the one a host registered for `url` with `registerFieldRenderer`).
+- 8fefefd: refactor(fields)!: retire six zero-consumer exports (four file-value helpers, the filter-condition extra operators, the grid column sum)
+  
+  Clause-②: no (narrowing)
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (runtime-export-retired @object-ui/fields#isImageValue, @object-ui/fields#uploadResultView, @object-ui/fields#withRecentUploads, @object-ui/fields#FILE_STORAGE_BASE_PATH, @object-ui/fields#FILTER_CONDITION_EXTRA_OPERATORS, @object-ui/fields#sumColumn) the retired operands are three file-value helper functions, a storage path constant, an operator list and a column sum helper; nothing in the workspace or in hotcrm imports any of them from the package entry, and no packages/spec schema, registered node type, conversion surface or stored shape names them, so there is nothing for `objectstack migrate meta` to rewrite -->
+  
+  **BREAKING** for a host that imports any of these six names from `@object-ui/fields`. None had an importer anywhere in the workspace or in hotcrm, so the Console and every `@object-ui/*` package are unaffected. Every module stays in the package: `FileField`, `ImageField` and `AvatarField` keep reading the file-value helpers, `FilterConditionField` keeps offering its extra operators, `fileUrlFromId` keeps building on the storage base path and `GridField` keeps summing its total column. Only the entry stops publishing them. `fileIdOf`, `fileUrlFromId`, `readFileValue`, `readFileValues`, `fileValueForSubmit`, `isFileIdToken`, `UploadIncompleteError`, the `FileValueView` and `UploadResultLike` types, `condToMongo`, `kvToCondition`, `isMatchAllCriteria`, `FilterConditionField`, `evalArith`, `lookupAutofillPatch`, `computeRow`, `GridField`, `LineItemsField` and the `GridColumn` type stay exported unchanged.
+  
+  What leaves, and what to write instead:
+  
+  - FROM `isImageValue` TO `readFileValue(value)` and a check on its `mimeType`.
+  - FROM `uploadResultView`, `withRecentUploads` TO `FileField` / `ImageField` / `AvatarField`, which show a just-uploaded file themselves.
+  - FROM `FILE_STORAGE_BASE_PATH` TO `fileUrlFromId`, which builds the download URL for a file id on that path.
+  - FROM `FILTER_CONDITION_EXTRA_OPERATORS` TO `FilterConditionField`, which offers those operators itself.
+  - FROM `sumColumn` TO `GridField`, which draws the total of its declared total column, or a local reduce over the rows.
+- 7a5f73e: refactor(fields, data-objectstack)!: `UploadProvider` moves into `@object-ui/fields`, the ObjectStack upload adapter into `@object-ui/data-objectstack`, and `@object-ui/providers` is retired
+  
+  Clause-②: yes (narrowing) — `@object-ui/fields` gains `UploadProvider`, `useUpload`, `UploadProviderProps` and the three upload contract types, and `@object-ui/data-objectstack` gains `createObjectStackUploadAdapter` and `ObjectStackUploadAdapterOptions`; the whole `@object-ui/providers` package is retired, which takes `createS3Adapter`, `createAzureBlobAdapter`, their option types and the exported `createObjectUrlAdapter` with it.
+  Metadata-protocol: none
+  
+  <!-- adr-0087: not-required (runtime-export-retired @object-ui/providers#*) the retired operand is a published ui package whose entry held a React upload context, its hook, four upload adapter factories and their TypeScript option and result types; no packages/spec schema, registered node type, ADR-0087 conversion surface or stored shape names any of them, so there is nothing for `objectstack migrate meta` to rewrite, and a consumer meets the move at its own import, where the compiler names the missing module -->
+  
+  **BREAKING.** `@object-ui/providers` is retired: `18.3.0` is its last published version, and it gets no further release. Its one remaining job was the upload context the file, image and avatar widgets of `@object-ui/fields` upload through, so that context now lives in `@object-ui/fields` itself, and the adapter that talks to an ObjectStack server's storage service lives in `@object-ui/data-objectstack`, beside the other fetch logic against that server. The upload contract the two share is `@object-ui/types`'.
+  
+  What leaves, and what to do:
+  
+  - FROM `@object-ui/providers` TO `@object-ui/fields` and `@object-ui/data-objectstack`: import `UploadProvider`, `useUpload` and the `UploadProviderProps`, `UploadAdapter`, `UploadOptions` and `UploadResult` types from `@object-ui/fields` (the three contract types also from `@object-ui/types`), and `createObjectStackUploadAdapter` with `ObjectStackUploadAdapterOptions` from `@object-ui/data-objectstack`, then drop the `@object-ui/providers` dependency. `createS3Adapter`, `createAzureBlobAdapter`, `S3AdapterOptions` and `AzureBlobAdapterOptions` had no consumer and leave with no replacement: a host that uploads to its own bucket writes an object with a `name` and an `upload(file, options)` method against the `UploadAdapter` type of `@object-ui/types` and hands it to `UploadProvider`. `createObjectUrlAdapter` is no longer exported: it stays the local `blob:` adapter `useUpload` falls back to when no `UploadProvider` is mounted.
+  
+  What does not change: `UploadProvider`, `useUpload` and `createObjectStackUploadAdapter` keep their signatures and behaviour, the presigned upload request is the same, and the widgets read the same context.
+- 2e33533: feat(ui): a home-currency amount shows the rate and document date it was converted at
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  A `record`-mode amount that declares `currencyConfig.homeAmount` (ADR-0144 D5) has its home field filled by the server when the record is saved. That home field now draws as a read-only amount in the organization's home currency, with the line "Converted at RATE on DATE" taken from the record's own rate and document-date fields, or "In the home currency (rate 1)" when the amount was already in the home currency. This holds on the record page and on authored form sections (the record dialog, the drawer and an inline `ObjectForm`), where it used to be a disabled number box with no currency symbol. A form laid out automatically still leaves readonly fields out, the home field included.
+  
+  `@object-ui/i18n` adds `homeAmountSourceOf`, `withHomeAmountSource`, `readHomeAmountSource`, `HOME_AMOUNT_SOURCE_KEY` and the `HomeAmountSource` type, plus two locale keys in every pack: `fields.currencyHome.convertedAt` and `fields.currencyHome.homeCurrency`. `@object-ui/fields` exports `HomeAmountHint`.
+  
+  The Studio field editor gains the three `homeAmount` pickers under `record` mode (home amount field, document date, rate field), listing only the fields the spec accepts for each. Re-picking an amount's currency code field no longer deletes its `homeAmount`.
+- 2a32bd4: feat(ui): a record-mode amount previews the home amount the save will store
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: none
+  
+  While a `record`-mode amount that declares `currencyConfig.homeAmount` (ADR-0144 D5) is edited, a line under it says what the save will store in the home field: "≈ AMOUNT at RATE on DATE" for a foreign currency, or "≈ AMOUNT (home currency)" when the amount is already in the home currency. The rate is the `sys_exchange_rate` row with the latest effective date on or before the document date, read once per currency and date. The arithmetic is `@objectstack/formula`'s, the same functions the engine stores the home amount with, so the preview matches the saved number digit for digit.
+  
+  With no rate in force, the line says the save is refused until one is added. With no document date, it asks for one. A member who may not read exchange rates sees that the amount is converted when they save, never "no rate" and never a guessed amount.
+  
+  `@object-ui/i18n` adds five locale keys in every pack: `fields.currencyHome.preview`, `previewSame`, `awaitingRate`, `awaitingDate` and `rateUnreadable`. `@object-ui/fields` now depends on `@objectstack/formula`, which `@object-ui/core` already depends on.
+- 7d0b47c: feat(spec): an action param's `helpText` takes an inline locale map, so an inline action can write its param hint per locale
+  
+  Clause-②: yes (widening)
+  Metadata-protocol: added
+  
+  - **`@objectstack/spec`: `ActionParamSchema.helpText`** accepts an inline locale map (`{ en: 'Why the account is paused', 'zh-CN': '暂停该账户的原因' }`) beside the bare sentence and the `{ dialect: 'template', source }` envelope, the same three forms `description`, `confirmText`, `successMessage` and each `outcomeMessages` entry already take. It reaches every action that carries params: a registered action (`ActionSchema.params`) and a page button's inline `action` (`InlineActionSchema`). A registered action's hint is still translated through the bundle at `objects.<object>._actions.<action>.params.<param>.helpText`; the map is the form for an inline action, which no bundle reaches. Before, a page that wrote its dialog's title, line, option labels and toast as locale maps had to leave the hint out or show it in one language. Every value that parsed before parses to the same thing. A map key that is not a language tag is refused with the slot's own sentence.
+  - **`@objectstack/lint`:** `os validate`, `compile` and the publish gate judge each entry of a `helpText` map as a sentence, named at `params[N].helpText.<locale>`, the way they judge a `description` map: a blank entry, a `${…}` or single-brace token, a hole over a root the dialog does not bind (`record` only), logic in a hole or an unknown formatter is an error. `os i18n extract` records the map as authored text (its locales count as covered, a locale it omits is reported) and scaffolds no bundle row for it.
+  - **`@objectstack/runtime`:** the agent-facing tool schema (`summarizeActionParams`, read by the MCP action tools) reads a `helpText` map's source-language entry (`en`, then `default`, then any entry) instead of falling back to the bound field's description.
+  - **`@object-ui/fields`:** `resolveActionParams` resolves a `helpText` map for the active language with the same order as `label`, so the param dialog draws the viewer's language. A map no longer falls through to the field's help line; an envelope with no `source` still does.
+  
+  Callers that read `helpText` and may now see a map: the console's `resolveActionParams` (handled here), the runtime's `summarizeActionParams` (handled here), the lint copy door and the i18n walk (handled here), and the server-side `translateAction`, which overlays a bundle sentence when one exists and otherwise passes the authored value through unchanged, as it does for a `description` map.
+- 5174603: fix(ui): Setup record pages name a sharing rule's recipient and read its condition in words, and the audit list names a sign-in row's session by its user
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - **`@object-ui/plugin-detail`.** The record page's highlights strip and details body hand each read face the record as `dependentValues`, as a list grid hands its row. A `recipient-picker` value is an id that means something only beside its `recipient_type`, so a sharing rule's page read the stored user id under 接收方 where its list read the user's name; it now reads the name.
+  - **`@object-ui/fields`.** `widget: 'filter-condition'` has a read face of its own: a list or detail cell draws the criteria through the widget's read-only display, which says it in the object's field and option labels ("Priority equals Urgent"; an OR group joined by its word, a boolean as a word). A criteria the builder cannot represent still reads as the stored JSON, and an empty one is the empty cell. A read-only widget no longer waits for its `object_name` to say anything: without it, the fields keep their api names.
+  - **`@object-ui/plugin-grid`.** A pointer cell (`referenceVia`) reads the target record with its name field expanded when that field is a reference the viewer may read, so a record named by a lookup reads as the referenced record's name: the audit list's sign-in rows name the session by its user instead of printing the user id. Any other name field is read as before, with no `$expand`.
+- f6faf75: fix(console): starting an impersonation lands on home, and a person's permission-set picker no longer offers the MCP agent sets
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - **Impersonation landing.** An administrator who starts an impersonation from a Setup page used to stay on that page, which the impersonated user usually cannot open, so the console showed "You don't have access to this app". The impersonation banner now navigates to `/` the moment a session the console held as an ordinary one becomes impersonated, and the console resolves the landing for the user it now holds. A console that boots into an impersonated session (a reload, a new tab, a deep link) stays on the URL it was opened at, and ending an impersonation does not move the page. The navigation goes through the host navigate the console supplies, so a deployment's basename applies.
+  - **Agent sets in the person picker.** The `permission-ref` field (the permission set on a person's grant, `sys_user_permission_set.permission_set`) no longer offers the three MCP agent ceiling sets (`mcp_agent_data_read`, `mcp_agent_data_write`, `mcp_agent_restricted`, the spec's `MCP_AGENT_PERMISSION_SETS`). Those are an AI assistant's own grants, which the runtime puts on the agent principal directly. A grant that already names one still shows it as the row's value, by its label beside its name. `position-ref` is unchanged.
+- 8b0fbb8: fix(app-shell,fields,plugin-form,plugin-gantt,plugin-grid,components,console): record pages, forms, drawers and preview cards draw a served object label as served
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  - **Now.** The record page (its title, breadcrumbs, related-list titles, delete and access-denied copy), the record form page and the console's create/edit dialog (title, save toast, way back to the list), the record drawer, the record preview card, the hover card over a lookup, a record-pointer cell, an object-ref cell, the closed-form notice, the gantt name column, the page header's record chrome, a form view's heading, the AI dock's surface chip, the Activity row and the report index name an object by the label the server served, as given. The server has already translated it, by its label order for an overridden item, so a `.custom` object extension's rename is kept over the base package's translation. Before, the served label reached the client's catalog lookup only as its fallback, so the base package's translation of the old name won on these surfaces after the list and header were fixed.
+  - **Unchanged.** When no label is served, the catalog key is asked first and the machine name (or its humanized form) stays the last resort, as before. An unedited object shows the same text as before, because the server serves the catalog's translation for it. Related lists and reference rails that only know an object's name, and the packaged-actions table (its object list is read without the session's language), still look the name up in the catalog. English is unchanged.
+- 5268f50: docs(fields): `currencyFractionDigits` is documented as CLDR's fraction digits, not ISO 4217's
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  The published declaration of `currencyFractionDigits` said it returns "the number of fraction digits ISO 4217 gives" a currency. It asks `Intl`, which reads CLDR's `currencyData`, so it now says CLDR. For sixteen codes the two differ (IQD 0 where ISO 4217 says 3, and fifteen codes 0 where ISO 4217 says 2), and the function has always answered CLDR's count. Words only: no return value changes.
+- 3f61e4f: feat(fields): Setup's notification topic and channel fields offer the served list and still take any typed value
+  
+  Clause-②: yes (widening) — five new `fields.preferenceOption.*` keys in every published `@object-ui/i18n` pack, and `field:notification-topic` / `field:notification-channel` join `@object-ui/fields`' registered widget keys (`RegisteredFieldWidgetType`); nothing is narrowed.
+  Metadata-protocol: none
+  
+  A notification preference's `topic` and `channel`, and a notification template's `topic`, already declare `widget: 'notification-topic'` / `'notification-channel'`. The record form now resolves both: `@object-ui/fields` registers `field:notification-topic` and `field:notification-channel`, a fillable arm of the registry-name picker (`RegistryRefField`).
+  
+  - **The list.** Read from `GET /api/v1/messaging/preference-options` through the host's authenticated fetch (`SchemaRendererContext.apiFetch`), once per page for every field that draws from it, and listed in the order the server sends: `*` first, shown as "All topics (*)" / "All channels (*)".
+  - **A typed value.** Typing in the picker's search box offers a row that commits the text exactly as typed. A stored value the list does not hold stays on screen as its own option, marked "not in the list". Nothing is refused or rewritten; the server stores what it is given, as before.
+  - **A channel that is not configured** is listed, labelled "(not configured)", and can be picked.
+  - **No list.** When the request fails, or answers an empty list, the field is the plain text box it was before, with no notice.
+  - **Strings.** Five new `fields.preferenceOption.*` keys in every built-in language pack (`zh-Hant` regenerated from `zh-Hans`).
+  
+  The template's `channel` field declares no widget and stays a text box.
+- 534a287: feat(console): the sharing-rule object picker lists only the objects a rule can take effect on, business objects first
+  
+  Clause-②: yes (widening) — `field:shareable-object-ref` joins `@object-ui/fields`' registered widget keys (`RegisteredFieldWidgetType`) and the console's known schema types; nothing is narrowed and no translation key is added.
+  Metadata-protocol: none
+  
+  The object field of a new sharing rule listed every registered object, most of them platform `sys_*` objects, including ones a save refuses with `SHARING_NOT_ENABLED` and the credential and session objects. It now lists only what `GET /api/v1/sharing/shareable-objects` answers: the objects a rule saved on would take effect on, business objects first and then platform objects, each group by label, in the order the server sends.
+  
+  - **The widget (`@object-ui/fields`).** `field:shareable-object-ref` reads the list through the host's authenticated fetch (`SchemaRendererContext.apiFetch`) and stores the object's name, as `object-ref` does, with the same `Label (name)` spelling. A stored name the list does not hold stays on screen as its own option, so editing a rule never drops it. The read-only face is `object-ref`'s.
+  - **When the list is not served.** A `403` (the caller is not a sharing-rule administrator), a `501` (sharing rules do not run on this deployment), any other failed or unreadable answer, and a host with no authenticated fetch all give the `object-ref` picker over every registered object, as before. The field is never an empty picker; the save doors still decide which object a rule may name.
+  - **The declaration (`@objectstack/plugin-sharing`).** `sys_sharing_rule.object_name` declares `widget: 'shareable-object-ref'` (was `object-ref`). A console without the widget draws the field as a text box, as with any unregistered widget.
+  - **The list cell, the record form and the grid.** The new key draws the same object label cell as `object-ref` (`@object-ui/app-shell`), the record form hands it the data source its fallback reads (`@object-ui/components`), and it is not edited inline in a grid cell, like the other widget-hint pickers.
+- f67f3b3: feat(fields): a notification preference's quiet hours are drawn as a time-zone picker and two times, not a JSON box
+  
+  Clause-②: yes
+  Metadata-protocol: none
+  
+  `@object-ui/fields` registers `field:quiet-hours` for a field that declares `widget: 'quiet-hours'`: a daily window when notifications are held, stored as `{ tz?, start: 'HH:MM', end: 'HH:MM' }`. The stored shape does not change. The control appears in Setup once `sys_notification_preference.quiet_hours` declares the hint; until then the field keeps the JSON editor.
+  
+  - **Writes.** Exactly `{ tz?, start, end }` once both times are set, and `null` once both are cleared. One time without the other writes nothing and marks the missing time invalid, so the form does not submit. Choosing a zone alone writes nothing.
+  - **Reads.** A stored window is read back into the control with each part kept as stored, so a part nobody edits is written back unchanged. A window without `tz` reads as UTC and stays without `tz` until a zone is chosen. A window whose start is later than its end runs past midnight, and the control says so; a window whose start and end are the same minute holds nothing, and the control says that too.
+  - **Time zones.** UTC first, then every zone `Intl.supportedValuesOf('timeZone')` lists that the `iana_time_zone` value domain accepts. A stored zone outside the list stays on screen, marked "not in the list", and is written back as stored.
+  - **Unreadable values.** A stored value of any other shape is shown as stored with a note, and is replaced only when the person chooses to set a new range and fills both times.
+  - **Strings.** Ten new `fields.quietHours.*` keys in every built-in language pack (`zh-Hant` regenerated from `zh-Hans`).
+  - `@object-ui/cli`'s known component types gain `field:quiet-hours`.
+- 6303e74: fix(fields): a refused location draft now blocks the record form's save
+  
+  Clause-②: no
+  Metadata-protocol: none
+  
+  Text in a `location` box that is not a coordinate pair (`Shenzhen 深圳`) was refused by the widget but never reached the form, so the form value stayed what it was and Update saved it with a success message. When the person had emptied the box first, the stored location was overwritten with `null`. `LocationField` now reports the refusal through `onInvalidInputChange`, and the form renderer turns it into the field's validation error, which blocks submit and is drawn by `<FormMessage/>` in the reader's language. Clearing the box on purpose still writes `null`, and a valid pair still saves. Hosts that do not pass `onInvalidInputChange` (inline edit) keep the widget's own refusal line, as before.
+- Updated dependencies [96b5dab]
+- Updated dependencies [7da99b7]
+- Updated dependencies [85d9264]
+- Updated dependencies [3214615]
+- Updated dependencies [d0512c2]
+- Updated dependencies [4261169]
+- Updated dependencies [8fefefd]
+- Updated dependencies [b5fd350]
+- Updated dependencies [ac5d0ce]
+- Updated dependencies [2cf269f]
+- Updated dependencies [604a2b3]
+- Updated dependencies [e396095]
+- Updated dependencies [f810c34]
+- Updated dependencies [7a5f73e]
+- Updated dependencies [2e33533]
+- Updated dependencies [2a32bd4]
+- Updated dependencies [ba875d2]
+- Updated dependencies [bb61872]
+- Updated dependencies [4211f50]
+- Updated dependencies [a1d243e]
+- Updated dependencies [7d0b47c]
+- Updated dependencies [9728ab1]
+- Updated dependencies [8aa2e91]
+- Updated dependencies [a4c3e73]
+- Updated dependencies [c17719d]
+- Updated dependencies [b90a6f7]
+- Updated dependencies [e8dc483]
+- Updated dependencies [bcdb1db]
+- Updated dependencies [9ebca94]
+- Updated dependencies [1e6f542]
+- Updated dependencies [140d8ce]
+- Updated dependencies [699ebd8]
+- Updated dependencies [b379262]
+- Updated dependencies [7945a3b]
+- Updated dependencies [4c2cd29]
+- Updated dependencies [4be8a2e]
+- Updated dependencies [471add3]
+- Updated dependencies [b5eb61d]
+- Updated dependencies [97e4249]
+- Updated dependencies [9037b13]
+- Updated dependencies [c2be734]
+- Updated dependencies [e3b56b2]
+- Updated dependencies [9049be2]
+- Updated dependencies [a52761f]
+- Updated dependencies [6db9198]
+- Updated dependencies [e8afd1e]
+- Updated dependencies [bd65cb6]
+- Updated dependencies [217ba78]
+- Updated dependencies [cde492d]
+- Updated dependencies [eee4149]
+- Updated dependencies [0f3ee58]
+- Updated dependencies [f3a52d3]
+- Updated dependencies [d59a1eb]
+- Updated dependencies [af3451b]
+- Updated dependencies [3a27208]
+- Updated dependencies [29cbfcc]
+- Updated dependencies [f0ad1f7]
+- Updated dependencies [03be565]
+- Updated dependencies [7e9fa4b]
+- Updated dependencies [bc8945f]
+- Updated dependencies [42afac7]
+- Updated dependencies [0c666c3]
+- Updated dependencies [38717d3]
+- Updated dependencies [a9fb14b]
+- Updated dependencies [6f095b9]
+- Updated dependencies [ac890f5]
+- Updated dependencies [5f80129]
+- Updated dependencies [0c7e95a]
+- Updated dependencies [aa57c76]
+- Updated dependencies [fc869c2]
+- Updated dependencies [fef212b]
+- Updated dependencies [c8e6d38]
+- Updated dependencies [d99cd3b]
+- Updated dependencies [dc51811]
+- Updated dependencies [b77c160]
+- Updated dependencies [09720e2]
+- Updated dependencies [b6caa14]
+- Updated dependencies [a77c2e9]
+- Updated dependencies [25fea77]
+- Updated dependencies [ea5807e]
+- Updated dependencies [d3f23d2]
+- Updated dependencies [ff12aed]
+- Updated dependencies [6c48d48]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [3da9a4c]
+- Updated dependencies [4be9734]
+- Updated dependencies [bff5ba2]
+- Updated dependencies [bb86ff9]
+- Updated dependencies [31260ca]
+- Updated dependencies [ef2ad31]
+- Updated dependencies [2046d21]
+- Updated dependencies [18870c9]
+- Updated dependencies [243eba1]
+- Updated dependencies [fa9c0aa]
+- Updated dependencies [fd749a4]
+- Updated dependencies [d9d42d4]
+- Updated dependencies [6a70821]
+- Updated dependencies [9d939c5]
+- Updated dependencies [d4a8439]
+- Updated dependencies [69c7cd6]
+- Updated dependencies [25e1c1a]
+- Updated dependencies [6a8f415]
+- Updated dependencies [56cac5e]
+- Updated dependencies [67d5d53]
+- Updated dependencies [47226e6]
+- Updated dependencies [c7d1367]
+- Updated dependencies [f5aaa0b]
+- Updated dependencies [0005fec]
+- Updated dependencies [2d6402c]
+- Updated dependencies [77c203a]
+- Updated dependencies [8293c74]
+- Updated dependencies [648089d]
+- Updated dependencies [10ecafd]
+- Updated dependencies [b6f4c0e]
+- Updated dependencies [b4f4781]
+- Updated dependencies [042efb7]
+- Updated dependencies [48231b0]
+- Updated dependencies [0d54279]
+- Updated dependencies [8e5fabe]
+- Updated dependencies [ac56acf]
+- Updated dependencies [a91409c]
+- Updated dependencies [ab12a3b]
+- Updated dependencies [2b35374]
+- Updated dependencies [29702d5]
+- Updated dependencies [a839020]
+- Updated dependencies [a7b8876]
+- Updated dependencies [7b10a30]
+- Updated dependencies [8b0fbb8]
+- Updated dependencies [4dde0ae]
+- Updated dependencies [590724f]
+- Updated dependencies [38d416f]
+- Updated dependencies [d2e2f6f]
+- Updated dependencies [b55d6ab]
+- Updated dependencies [aad1603]
+- Updated dependencies [ad2393f]
+- Updated dependencies [0e4747a]
+- Updated dependencies [5bca14f]
+- Updated dependencies [a058413]
+- Updated dependencies [7145bf3]
+- Updated dependencies [55d9dd4]
+- Updated dependencies [af8aab1]
+- Updated dependencies [062236c]
+- Updated dependencies [a59d00a]
+- Updated dependencies [4bf9a2d]
+- Updated dependencies [d996c38]
+- Updated dependencies [0c9aa82]
+- Updated dependencies [49c8568]
+- Updated dependencies [47c457b]
+- Updated dependencies [4564d6f]
+- Updated dependencies [f2ea193]
+- Updated dependencies [5268f50]
+- Updated dependencies [5268f50]
+- Updated dependencies [7b2e557]
+- Updated dependencies [115a43a]
+- Updated dependencies [a30c4f4]
+- Updated dependencies [0cba0ce]
+- Updated dependencies [c893b3d]
+- Updated dependencies [677d542]
+- Updated dependencies [9bdeed2]
+- Updated dependencies [c1da957]
+- Updated dependencies [3479c33]
+- Updated dependencies [000a4c0]
+- Updated dependencies [f4d9c09]
+- Updated dependencies [c77dd17]
+- Updated dependencies [ebe0a98]
+- Updated dependencies [9038187]
+- Updated dependencies [f108e6d]
+- Updated dependencies [40eaae7]
+- Updated dependencies [45916c9]
+- Updated dependencies [b2ce250]
+- Updated dependencies [5cb7d7e]
+- Updated dependencies [b631573]
+- Updated dependencies [78d4fe9]
+- Updated dependencies [78eb352]
+- Updated dependencies [a0b40f2]
+- Updated dependencies [6ddf827]
+- Updated dependencies [d9d3eb7]
+- Updated dependencies [2ce2646]
+- Updated dependencies [bd1b768]
+- Updated dependencies [468e0c1]
+- Updated dependencies [6106b73]
+- Updated dependencies [0f920b9]
+- Updated dependencies [0f920b9]
+- Updated dependencies [33bc8ae]
+- Updated dependencies [ed4b832]
+- Updated dependencies [b70d9aa]
+- Updated dependencies [1c66988]
+- Updated dependencies [584f7b8]
+- Updated dependencies [065bba7]
+- Updated dependencies [d8d0791]
+- Updated dependencies [66b17a3]
+- Updated dependencies [f5e23e2]
+- Updated dependencies [a1afbb9]
+- Updated dependencies [150f740]
+- Updated dependencies [42eb126]
+- Updated dependencies [3f61e4f]
+- Updated dependencies [8cf1fd0]
+- Updated dependencies [51992df]
+- Updated dependencies [98583cd]
+- Updated dependencies [a5cb4f1]
+- Updated dependencies [3c1eb63]
+- Updated dependencies [d57be87]
+- Updated dependencies [2b752f1]
+- Updated dependencies [c0068ed]
+- Updated dependencies [7fe019f]
+- Updated dependencies [1f37085]
+- Updated dependencies [534a287]
+- Updated dependencies [71d094c]
+- Updated dependencies [8b16445]
+- Updated dependencies [9a63ecb]
+- Updated dependencies [8c75f83]
+- Updated dependencies [3aa0b42]
+- Updated dependencies [82e6da1]
+- Updated dependencies [acfc86c]
+- Updated dependencies [eff90af]
+- Updated dependencies [18ed2db]
+- Updated dependencies [39aa3f6]
+- Updated dependencies [ce965cf]
+- Updated dependencies [f88ca70]
+- Updated dependencies [f67f3b3]
+- Updated dependencies [76e4c2c]
+- Updated dependencies [1ff1d45]
+- Updated dependencies [47bc621]
+- Updated dependencies [efbe1a0]
+- Updated dependencies [2c6b936]
+- Updated dependencies [46ec2ec]
+- Updated dependencies [2d1a76b]
+- Updated dependencies [3b7219e]
+- Updated dependencies [3fed8ce]
+- Updated dependencies [907fdca]
+- Updated dependencies [f25414e]
+- Updated dependencies [75d7fb1]
+- Updated dependencies [41106b5]
+- Updated dependencies [8aaa69f]
+- Updated dependencies [fe88ecd]
+- Updated dependencies [ef4af73]
+- Updated dependencies [7e697ff]
+- Updated dependencies [d9a232f]
+- Updated dependencies [2b3e3eb]
+- Updated dependencies [0cd594b]
+- Updated dependencies [fdfcc7a]
+- Updated dependencies [e627eaa]
+- Updated dependencies [6be71ab]
+- Updated dependencies [c8223fb]
+- Updated dependencies [3224545]
+- Updated dependencies [26d30d7]
+- Updated dependencies [3684d18]
+- Updated dependencies [3684d18]
+- Updated dependencies [ac8fede]
+- Updated dependencies [60996d4]
+- Updated dependencies [2715a09]
+- Updated dependencies [6180c87]
+- Updated dependencies [bc41e01]
+- Updated dependencies [52ffd5a]
+- Updated dependencies [f6b8985]
+- Updated dependencies [93ff5dd]
+- Updated dependencies [016ec88]
+- Updated dependencies [94019a6]
+- Updated dependencies [60f8149]
+- Updated dependencies [01559b8]
+- Updated dependencies [8075338]
+- Updated dependencies [93f0d43]
+- Updated dependencies [c7dc143]
+- Updated dependencies [7d4fcb6]
+- Updated dependencies [4c928f5]
+- Updated dependencies [171cf6d]
+- Updated dependencies [49bc3be]
+- Updated dependencies [ff04ad8]
+- Updated dependencies [36b216b]
+- Updated dependencies [f714b0a]
+- Updated dependencies [1368536]
+- Updated dependencies [cc8c4b0]
+- Updated dependencies [de6d893]
+- Updated dependencies [f1d1f6c]
+- Updated dependencies [133f75a]
+- Updated dependencies [f84205b]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [eca7cd2]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [cf4b9bf]
+- Updated dependencies [614e831]
+- Updated dependencies [6303e74]
+- Updated dependencies [e1dac19]
+- Updated dependencies [136eba4]
+- Updated dependencies [44a030b]
+- Updated dependencies [21510bb]
+- Updated dependencies [0fd363d]
+- Updated dependencies [f127b04]
+- Updated dependencies [d6b88f1]
+- Updated dependencies [4123865]
+- Updated dependencies [6ffe37e]
+- Updated dependencies [63a470a]
+- Updated dependencies [b463ec6]
+  - @object-ui/components@18.4.0
+  - @object-ui/core@18.4.0
+  - @object-ui/react@18.4.0
+  - @object-ui/types@18.4.0
+  - @object-ui/i18n@18.4.0
+  - @objectstack/spec@18.4.0
+  - @object-ui/mobile@18.4.0
+  - @objectstack/formula@18.4.0
+  - @object-ui/permissions@18.4.0
+
 ## 18.3.0
 
 ### Minor Changes
